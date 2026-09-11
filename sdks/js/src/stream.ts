@@ -19,6 +19,9 @@ import {
   transportError,
   parseRetryAfter,
   isAbortLike,
+  sanitizeCause,
+  redactKeys,
+  ABORT_NAMES,
 } from './errors';
 import { buildChatBody } from './options';
 import { buildSamplingParams } from './sampling';
@@ -125,6 +128,27 @@ export interface StreamChunk {
   raw: Record<string, unknown>;
 }
 
+/**
+ * Token counts as the gateway reported them, normalized across both wires.
+ *
+ * A field is `null` when the wire did not report it — NEVER `0`. Zero is a
+ * measurement; absence is not, and rendering absence as zero claims a free
+ * request, which no enabled model is (Rule #28).
+ */
+export interface StreamUsage {
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+}
+
+/** One tool call, reassembled from the fragments either wire streams. */
+export interface StreamToolCall {
+  id: string | null;
+  name: string | null;
+  /** The raw JSON arguments string, concatenated in arrival order. */
+  arguments: string;
+}
+
 export interface StreamResult {
   /**
    * Metadata from the response headers, read ONCE before the body was touched.
@@ -160,12 +184,59 @@ export interface StreamResult {
    *    back a partial answer that reads as complete.
    */
   text(): Promise<string>;
+  /**
+   * Token counts, normalized across the OpenAI and Anthropic frame shapes.
+   *
+   * `null` when the stream reported none. Drains whatever is left of `chunks`
+   * first, exactly as `text()` does, because usage arrives in the LAST frames
+   * — an accessor that answered before the stream finished would answer
+   * `null` on every stream that was about to report a figure.
+   */
+  usage(): Promise<StreamUsage | null>;
+  /**
+   * The finish reason, read from whichever field the wire used: OpenAI's
+   * `choices[0].finish_reason` and Anthropic's `stop_reason` are the same fact
+   * under two names, so a caller need not know which wire answered.
+   *
+   * The VALUE is the wire's own string and is NOT translated — OpenAI says
+   * `'stop'` / `'length'` / `'tool_calls'` where Anthropic says `'end_turn'` /
+   * `'max_tokens'` / `'tool_use'`. Switch on the pair, not on one of them.
+   * Mapping them onto a single vocabulary here would have to invent a value
+   * for every reason only one wire has, and would silently re-label the day a
+   * provider adds one — so the raw string is passed through and named as such.
+   *
+   * `null` when the stream never said — which, on a stream that ended cleanly,
+   * is itself worth surfacing rather than guessing `'stop'`.
+   */
+  finishReason(): Promise<string | null>;
+  /**
+   * Tool calls, reassembled from the fragments either wire streams (OpenAI's
+   * indexed `delta.tool_calls`, Anthropic's `content_block_start` +
+   * `input_json_delta`). Empty when the answer called no tool.
+   *
+   * `arguments` is the raw JSON STRING, not a parsed object: a stream cut
+   * short leaves it incomplete, and parsing it here would either throw on a
+   * truncation the caller can see for themselves or silently hand back a
+   * half-built object.
+   */
+  toolCalls(): Promise<StreamToolCall[]>;
 }
 
 /** Mutable state shared by the iterator and `text()`. */
 interface StreamState {
   text: string;
   failure: nRouterError | Error | null;
+  /**
+   * Absent until a frame reports one. Kept separate from `text` because these
+   * are what a caller reconciles a spend row against, and a client showing
+   * `-` for tokens is a reconciliation gap.
+   */
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  finishReason: string | null;
+  /** Keyed by the wire's own index, so out-of-order fragments still join. */
+  toolCalls: Map<number, StreamToolCall>;
 }
 
 /**
@@ -213,6 +284,7 @@ export async function streamChat(
     advanced: opts.advancedSampling === true,
     model: opts.model,
     provider: opts.modelProvider,
+    canonicalModel: opts.canonicalModel,
     temperature: opts.temperature,
     topP: opts.topP,
   });
@@ -277,18 +349,68 @@ export async function streamChat(
     });
   }
 
-  const state: StreamState = { text: '', failure: null };
+  const state: StreamState = {
+    text: '',
+    failure: null,
+    promptTokens: null,
+    completionTokens: null,
+    totalTokens: null,
+    finishReason: null,
+    toolCalls: new Map(),
+  };
   const iterator = readFrames(body, state, response.status, meta, signal);
+
+  /** Run the iterator to completion. Idempotent — an exhausted one says done. */
+  const drain = async (): Promise<void> => {
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done === true) break;
+    }
+  };
 
   return {
     meta,
     // One iterator, handed out every time: the body is single-use.
     chunks: { [Symbol.asyncIterator]: () => iterator },
-    async text(): Promise<string> {
-      for (;;) {
-        const next = await iterator.next();
-        if (next.done === true) break;
+    async usage(): Promise<StreamUsage | null> {
+      await drain();
+      if (state.failure !== null) throw state.failure;
+      if (
+        state.promptTokens === null &&
+        state.completionTokens === null &&
+        state.totalTokens === null
+      ) {
+        // NOTHING was reported. `null`, never a zero-filled object — a zero
+        // here reads as a free request (Rule #28).
+        return null;
       }
+      return {
+        promptTokens: state.promptTokens,
+        completionTokens: state.completionTokens,
+        // Derived only when both halves are real figures; two nulls do not
+        // add up to a zero.
+        totalTokens:
+          state.totalTokens ??
+          (state.promptTokens !== null && state.completionTokens !== null
+            ? state.promptTokens + state.completionTokens
+            : null),
+      };
+    },
+    async finishReason(): Promise<string | null> {
+      await drain();
+      if (state.failure !== null) throw state.failure;
+      return state.finishReason;
+    },
+    async toolCalls(): Promise<StreamToolCall[]> {
+      await drain();
+      if (state.failure !== null) throw state.failure;
+      // In index order, which is the order the model emitted them.
+      return [...state.toolCalls.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([, call]) => ({ ...call }));
+    },
+    async text(): Promise<string> {
+      await drain();
       // A failure recorded during iteration is re-thrown on every later read.
       // A truncated answer that looks complete is worse than an error.
       if (state.failure !== null) throw state.failure;
@@ -316,6 +438,135 @@ export function isAbortError(err: unknown): boolean {
   // one to decide whether to retry a cancelled stream took the wrong branch.
   // One implementation per cross-cutting concern.
   return isAbortLike(err);
+}
+
+function isDefaultAbort(reason: unknown): boolean {
+  if (reason === undefined || reason === null) return true;
+  if (typeof reason === 'object' && reason !== null) {
+    const name = (reason as { name?: unknown }).name;
+    if (name !== 'AbortError' && name !== 'Error' && name !== undefined) return false;
+  }
+  const msg =
+    typeof (reason as { message?: unknown }).message === 'string'
+      ? (reason as { message: string }).message.trim()
+      : typeof reason === 'string'
+        ? reason.trim()
+        : null;
+  if (msg === null) return false;
+  if (!msg) return true;
+  return (
+    /^(this\s+|the\s+)?operation was aborted\.?$/i.test(msg) ||
+    /^(this\s+|the\s+)?user aborted a request\.?$/i.test(msg) ||
+    /^(this\s+|the\s+)?signal (is|has been) aborted(\s+without reason)?\.?$/i.test(msg) ||
+    /^fetch is aborted\.?$/i.test(msg)
+  );
+}
+
+function defineHidden(target: unknown, key: string, value: unknown): void {
+  if (typeof target !== 'object' || target === null) return;
+  try {
+    Object.defineProperty(target, key, {
+      value,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  } catch {
+    // ignore if frozen
+  }
+}
+
+function cloneNRouterError(err: nRouterError, cause: unknown): nRouterError {
+  const cloned = Object.create(Object.getPrototypeOf(err));
+  const descs = Object.getOwnPropertyDescriptors(err) as Record<string, PropertyDescriptor | undefined>;
+  delete descs.cause;
+  delete descs.message;
+  delete descs.name;
+  delete descs.stack;
+  Object.defineProperties(cloned, descs as PropertyDescriptorMap);
+  defineHidden(cloned, 'message', err.message);
+  defineHidden(cloned, 'name', err.name);
+  if (err.stack !== undefined) {
+    defineHidden(cloned, 'stack', err.stack);
+  }
+  defineHidden(cloned, 'cause', cause);
+  return cloned;
+}
+
+function isErrorLike(val: unknown): val is Error {
+  if (val instanceof Error) return true;
+  if (typeof val !== 'object' || val === null) return false;
+  const tag = Object.prototype.toString.call(val);
+  return tag === '[object Error]' || tag === '[object DOMException]';
+}
+
+const SENSITIVE_KEY_RE =
+  /(auth|authorization|token|secret|password|passwd|cookie|credential|session|bearer|jwt|[-_]keys?\b|\bkeys?\b|[a-z0-9]Keys?\b)/i;
+const MAX_STRUCTURED_DEPTH = 8;
+
+function sanitizeReasonValue(val: unknown, depth = 0, seen = new Set<unknown>()): unknown {
+  if (depth >= MAX_STRUCTURED_DEPTH) return undefined;
+  if (typeof val === 'string') return redactKeys(val);
+  if (typeof val === 'number' || typeof val === 'boolean' || val === null) return val;
+  if (val instanceof Date) return val.toISOString();
+  if (isErrorLike(val)) return sanitizeCause(val, depth + 1, seen);
+  if (Array.isArray(val)) {
+    if (seen.has(val)) return [];
+    const nextSeen = new Set(seen);
+    nextSeen.add(val);
+    return val
+      .map((item) => sanitizeReasonValue(item, depth + 1, nextSeen))
+      .filter((item) => item !== undefined);
+  }
+  if (typeof val === 'object' && val !== null) {
+    return sanitizeStructuredReason(val as Record<string, unknown>, depth, seen);
+  }
+  return undefined;
+}
+
+function sanitizeStructuredReason(
+  obj: Record<string, unknown>,
+  depth = 0,
+  seen = new Set<unknown>(),
+): Record<string, unknown> {
+  if (depth >= MAX_STRUCTURED_DEPTH) return {};
+  if (typeof obj !== 'object' || obj === null) return {};
+  if (seen.has(obj)) return {};
+  const nextSeen = new Set(seen);
+  nextSeen.add(obj);
+
+  const out: Record<string, unknown> = {};
+  let entries: [string, unknown][] = [];
+  try {
+    entries = Object.entries(obj);
+  } catch {
+    return {};
+  }
+
+  for (const [k, v] of entries) {
+    if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+    if (k === 'request' || k === 'headers') continue;
+    if (k !== 'requestId' && k !== 'request_id' && SENSITIVE_KEY_RE.test(k)) continue;
+
+    const safeVal = sanitizeReasonValue(v, depth + 1, nextSeen);
+    if (safeVal !== undefined) {
+      out[k] = safeVal;
+    }
+  }
+  return out;
+}
+
+function attachMeta(target: unknown, status?: number, meta?: ResponseMeta): void {
+  if (typeof target !== 'object' || target === null) return;
+  if (meta?.requestId && !(target as { requestId?: unknown }).requestId) {
+    defineHidden(target, 'requestId', meta.requestId);
+  }
+  if (meta && !(target as { meta?: unknown }).meta) {
+    defineHidden(target, 'meta', meta);
+  }
+  if (status !== undefined && ((target as { status?: unknown }).status === undefined || (target as { status?: unknown }).status === null)) {
+    defineHidden(target, 'status', status);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +616,7 @@ async function* readFrames(
         if (outcome.kind === 'skip') continue;
 
         state.text += outcome.chunk.delta;
+        absorbMetadata(state, outcome.chunk.raw);
         yield outcome.chunk;
       }
     }
@@ -386,48 +638,198 @@ async function* readFrames(
       yield outcome.chunk;
     }
 
+    // If the stream ended without [DONE], check if the caller aborted.
+    // Cancellation takes precedence over the truncation error so retry layers
+    // do not mistake a caller abort for an unexpected stream drop.
+    throwIfAborted(signal);
+
     // FELL OFF THE END WITHOUT `data: [DONE]`.
     //
     // Every `return` above is a sentinel we actually saw. Reaching here means
-    // the connection closed cleanly mid-answer — a dropped upstream, a proxy
-    // idle timeout, a killed worker. The frames already yielded are real and
+    // the connection closed mid-stream. The frames already yielded are real and
     // the request was BILLED, so the tokens are not the problem; reporting the
     // result as COMPLETE is. `text()` would hand back a truncated answer that
-    // is indistinguishable from a short one, which is the same
-    // silently-wrong-and-confident failure the buffered path refuses.
+    // is indistinguishable from a short one.
     //
-    // Transport, not configuration: the identical request can succeed next
-    // time, so this one IS retryable.
-    throw transportError(
+    // PGSDK-112: The stream was cut off after tokens were billed.
+    // Classifying it as a retryable transport error causes generic retry
+    // loops to pay for the same completion again. It is non-auto-retryable.
+    throw new nRouterError(
       'the stream ended without its [DONE] sentinel; the answer is truncated and ' +
-        'the request was billed. Retrying is safe.',
-      { status, meta },
+        'the request was billed. Retrying issues a NEW billed request.',
+      { status, meta, code: 'stream_truncated' },
     );
   } catch (err) {
-    // An abort is recorded like any other terminal condition so a later
-    // `text()` cannot return the partial answer as if it were whole — but it
-    // is re-thrown unwrapped, so `isAbortError` still recognises it and no
-    // retry layer mistakes it for a transient failure.
-    // An abort and an nRouterError are re-thrown UNWRAPPED — the first so
-    // `isAbortError` still recognises it and no retry layer treats it as
-    // transient, the second because it is already classified.
-    //
-    // Anything else is a raw socket or runtime failure escaping out of the
-    // body iterator, and rethrowing it meant nr.stream() left the advertised
-    // nRouterError hierarchy entirely: `isRetryable` answered false and the
-    // status and request id were lost, for a request that DID reach the
-    // gateway.
-    // `signal.aborted`, not just the error's NAME. `AbortController.abort()`
-    // with no argument produces an AbortError, but `abort(new Error('user
-    // cancelled'))` propagates that reason verbatim — a generic Error, which
-    // the name check missed. It was then wrapped as a transport failure and
-    // reported RETRYABLE, so a generic retry loop could resend a billed
-    // request the caller had explicitly cancelled (gate 8). The signal is the
-    // authority on whether a cancellation happened; the name is only a hint.
-    if (err instanceof nRouterError || isAbortError(err) || signal?.aborted) {
-      state.failure = err instanceof Error ? err : new Error(String(err));
+    // An nRouterError is re-thrown UNWRAPPED because it is already classified
+    // and carries kind, status, requestId, and response meta for auditing and reconciliation.
+    // If the signal was aborted, guarantee wasAborted(err.cause) is true so isRetryable() is false.
+    if (err instanceof nRouterError) {
+      if (signal?.aborted) {
+        const abortMarker = new Error('the request was aborted');
+        abortMarker.name = 'AbortError';
+
+        const rawExistingCause = err.cause;
+        const safeExistingCause =
+          rawExistingCause !== undefined ? sanitizeCause(rawExistingCause) : undefined;
+        const safeAbortCause =
+          signal.reason !== undefined ? sanitizeReasonValue(signal.reason) : undefined;
+
+        if (safeAbortCause !== undefined) {
+          defineHidden(abortMarker, 'reason', safeAbortCause);
+        }
+        if (safeExistingCause !== undefined) {
+          defineHidden(abortMarker, 'cause', safeExistingCause);
+        } else if (isErrorLike(safeAbortCause)) {
+          defineHidden(abortMarker, 'cause', safeAbortCause);
+        }
+
+        // Clone err to ensure caller's error object or shared instance is NEVER mutated in place
+        const clonedErr = cloneNRouterError(err, abortMarker);
+        attachMeta(clonedErr, status, meta);
+        state.failure = clonedErr;
+        throw clonedErr;
+      }
+      state.failure = err;
       throw err;
     }
+
+    // If the request was cancelled by the caller via AbortSignal:
+    // A cancelled request must never be resent — it was billed (gate 8).
+    // An abort takes precedence over any transport failure so retry layers never
+    // mistake a cancellation for a transient retryable error.
+    if (signal?.aborted) {
+      const reason = signal.reason;
+      const hasCustomReason =
+        reason !== undefined && !isDefaultAbort(reason);
+
+      let errorName = 'AbortError';
+      if (
+        typeof (reason as { name?: unknown })?.name === 'string' &&
+        ABORT_NAMES.has((reason as { name: string }).name)
+      ) {
+        errorName = (reason as { name: string }).name;
+      } else if (
+        typeof (err as { name?: unknown })?.name === 'string' &&
+        ABORT_NAMES.has((err as { name: string }).name)
+      ) {
+        errorName = (err as { name: string }).name;
+      } else {
+        const ctorName =
+          typeof (reason as { constructor?: { name?: unknown } })?.constructor?.name === 'string' &&
+          (reason as { constructor: { name: string } }).constructor.name !== 'Object'
+            ? (reason as { constructor: { name: string } }).constructor.name
+            : typeof (err as { constructor?: { name?: unknown } })?.constructor?.name === 'string' &&
+              (err as { constructor: { name: string } }).constructor.name !== 'Object'
+              ? (err as { constructor: { name: string } }).constructor.name
+              : undefined;
+        if (typeof ctorName === 'string' && ABORT_NAMES.has(ctorName)) {
+          errorName = ctorName;
+        }
+      }
+
+      let rawMsg = 'the request was aborted';
+      if (hasCustomReason) {
+        if (typeof reason === 'string') {
+          rawMsg = reason;
+        } else if (reason instanceof Error && reason.message) {
+          rawMsg = reason.message;
+        } else if (
+          typeof reason === 'object' &&
+          reason !== null &&
+          'message' in reason &&
+          typeof (reason as { message: unknown }).message === 'string' &&
+          (reason as { message: string }).message
+        ) {
+          rawMsg = (reason as { message: string }).message;
+        }
+      }
+
+      const trimmedMsg = typeof rawMsg === 'string' ? rawMsg.trim() : '';
+      const msg = trimmedMsg.length > 0 ? redactKeys(rawMsg) : 'the request was aborted';
+
+      const abortErr = new Error(msg);
+      abortErr.name = errorName;
+
+      // Always sanitize cause unconditionally to enforce Rule #5 (no leaked headers or credentials in logs).
+      // If caller aborted with custom reason AND there was a distinct underlying transport error (err !== signal.reason),
+      // preserve both: custom reason as causeVal, with transport err chained underneath.
+      let causeVal: unknown;
+      if (hasCustomReason) {
+        causeVal = sanitizeReasonValue(reason);
+        if (err !== undefined && err !== signal.reason) {
+          const safeErr = sanitizeCause(err);
+          if (typeof causeVal === 'object' && causeVal !== null) {
+            if (!(causeVal as { cause?: unknown }).cause) {
+              defineHidden(causeVal, 'cause', safeErr);
+            }
+          }
+        }
+      } else {
+        const rawCause = err ?? reason;
+        causeVal = sanitizeReasonValue(rawCause);
+      }
+
+      if (causeVal !== undefined) {
+        defineHidden(abortErr, 'cause', causeVal);
+      }
+
+      attachMeta(abortErr, status, meta);
+      state.failure = abortErr;
+      throw abortErr;
+    }
+
+    // If the transport/fetch threw an AbortError directly:
+    if (isAbortError(err)) {
+      const ctorName =
+        typeof (err as { constructor?: { name?: unknown } })?.constructor?.name === 'string' &&
+        (err as { constructor: { name: string } }).constructor.name !== 'Object'
+          ? (err as { constructor: { name: string } }).constructor.name
+          : undefined;
+
+      let errorName = 'AbortError';
+      if (
+        typeof (err as { name?: unknown })?.name === 'string' &&
+        ABORT_NAMES.has((err as { name: string }).name)
+      ) {
+        errorName = (err as { name: string }).name;
+      } else if (typeof ctorName === 'string' && ABORT_NAMES.has(ctorName)) {
+        errorName = ctorName;
+      }
+
+      let rawMsg = 'the request was aborted';
+      if (typeof err === 'string' && err && !isDefaultAbort(err)) {
+        rawMsg = err;
+      } else if (err instanceof Error && err.message && !isDefaultAbort(err)) {
+        rawMsg = err.message;
+      } else if (
+        typeof err === 'object' &&
+        err !== null &&
+        'message' in err &&
+        typeof (err as { message: unknown }).message === 'string' &&
+        (err as { message: string }).message &&
+        !isDefaultAbort(err)
+      ) {
+        rawMsg = (err as { message: string }).message;
+      }
+
+      const trimmedMsg = typeof rawMsg === 'string' ? rawMsg.trim() : '';
+      const msg = trimmedMsg.length > 0 ? redactKeys(rawMsg) : 'the request was aborted';
+
+      const abortErr = new Error(msg);
+      abortErr.name = errorName;
+
+      const causeVal = sanitizeReasonValue(err);
+      if (causeVal !== undefined) {
+        defineHidden(abortErr, 'cause', causeVal);
+      }
+
+      attachMeta(abortErr, status, meta);
+      state.failure = abortErr;
+      throw abortErr;
+    }
+
+    // Anything else is a raw socket or runtime failure escaping out of the
+    // body iterator.
     const wrapped = transportError(
       `the stream failed while being read (${err instanceof Error ? err.message : String(err)})`,
       { status, meta, cause: err },
@@ -442,6 +844,24 @@ type FrameOutcome =
   | { kind: 'skip' }
   | { kind: 'done' }
   | { kind: 'error'; error: nRouterError };
+
+/**
+ * Whether a frame's top-level `error` member is reporting an actual failure.
+ *
+ * FOUR values are the "no error on this chunk" sentinel, and upstreams differ
+ * on which they stamp: `null`, `false`, `0` (errno 0 means success) and `""`.
+ * Treating any of them as a verdict cuts a billed stream on a frame that
+ * reported success — which is the single failure this whole branch exists to
+ * avoid, so the sentinel set is deliberately wide.
+ *
+ * It costs nothing to be wide: a real error is an object or a non-empty
+ * string, and one carried as `0` or `""` has no message to report anyway.
+ */
+function carriesError(value: unknown): boolean {
+  if (value == null || value === false) return false;
+  if (value === 0 || value === '') return false;
+  return true;
+}
 
 /** Decide what one parsed SSE frame means. */
 function interpret(
@@ -496,7 +916,19 @@ function interpret(
   // exists to prevent. Both tests are applied: the `event: error` label and a
   // top-level `error` member, because they agree on the gateway's own frame
   // and each catches a shape the other misses.
-  if (frame.event === 'error' || raw.error !== undefined) {
+  //
+  // `carriesError` and NOT `!== undefined`: an upstream that stamps an
+  // `error` member on EVERY chunk has four ways of saying "not this one" —
+  // `null`, `false`, `0` (errno 0 is success) and `""`. Every one of them is
+  // `!= null`-true or `!== false`-true, so a narrower guard takes this branch
+  // on a frame that reported success and discards a billed answer mid-flight,
+  // with a message built from a frame that carried no verdict at all.
+  //
+  // Nothing real is lost by skipping the four: a genuine error is an object or
+  // a non-empty string, and an `error` of `0` or `""` has no message to hand
+  // the caller even if we did report it. A server that means it also labels
+  // the frame `event: error`, which the first test catches regardless.
+  if (frame.event === 'error' || carriesError(raw.error)) {
     return {
       kind: 'error',
       error: errorFromValue(raw, data, status, meta),
@@ -508,9 +940,8 @@ function interpret(
   // guardrail cut arriving ahead of it is never skipped past.
   //
   // Without this the truncation refusal below fires on every COMPLETE Claude
-  // stream: the reader falls off the end of a whole answer, reports it
-  // truncated and marks it retryable, so a caller's retry loop re-sends — and
-  // re-pays for — a request that already succeeded (gateway §4f gate 8).
+  // stream: the reader falls off the end of a whole answer and reports it
+  // truncated, refusing a request that already succeeded (gateway §4f gate 8).
   if (raw.type === 'message_stop' || raw.type === 'response.completed') {
     return { kind: 'done' };
   }
@@ -525,6 +956,161 @@ function interpret(
  * (`choices[0].text`), direct deltas (`delta`), and Anthropic messages
  * (`content_block_delta` carrying `delta.text`).
  */
+/** A finite number, or null. Never coerces, never invents a 0. */
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** The slot for one tool call, created on first sight of its index. */
+function toolSlot(state: StreamState, index: number): StreamToolCall {
+  let slot = state.toolCalls.get(index);
+  if (slot === undefined) {
+    slot = { id: null, name: null, arguments: '' };
+    state.toolCalls.set(index, slot);
+  }
+  return slot;
+}
+
+/**
+ * The slot an OPENAI-shaped tool-call fragment belongs to when the wire omits
+ * `index`.
+ *
+ * `state.toolCalls.size` was the fallback and it SHARDED: the first fragment
+ * opened slot 0, which made the size 1, so the very next fragment of the SAME
+ * call opened slot 1. One call's arguments landed in two slots as two
+ * un-parseable halves, the second with a null id and a null name — a tool the
+ * caller cannot invoke and JSON they cannot parse.
+ *
+ * Fragments of an unindexed call therefore join the slot most recently opened.
+ * A fragment announcing a DIFFERENT `id` opens the next one, because the id is
+ * the only call boundary an unindexed wire gives us; joining across it would
+ * concatenate two calls' arguments into one broken string.
+ *
+ * An open slot whose id is still `null` is DIFFERENT from every announced id,
+ * not the same as all of them. Treating null as a match was the mirror of the
+ * sharding bug above: a wire that never named its first call had the second
+ * call's fragments folded onto it, renaming the first call and gluing both
+ * argument strings together — one call reported where two were made.
+ */
+function lastOpenedToolSlot(state: StreamState): number | null {
+  let last: number | null = null;
+  for (const key of state.toolCalls.keys()) {
+    if (last === null || key > last) last = key;
+  }
+  return last;
+}
+
+function unindexedToolSlot(state: StreamState, id: unknown): number {
+  const last = lastOpenedToolSlot(state);
+  if (last === null) return 0;
+
+  const open = state.toolCalls.get(last);
+  const startsANewCall = typeof id === 'string' && open !== undefined && open.id !== id;
+  return startsANewCall ? last + 1 : last;
+}
+
+/**
+ * Pull usage, finish reason and tool calls out of a frame of EITHER wire.
+ *
+ * The counterpart to `extractDelta`: that normalizes the text, this normalizes
+ * everything else a caller needs and would otherwise write two parsers for.
+ * Every field is LAST-WINS, because both wires report the final figure in a
+ * late frame and neither revises it afterwards.
+ */
+function absorbMetadata(state: StreamState, raw: Record<string, unknown>): void {
+  // ---- usage -------------------------------------------------------------
+  // OpenAI: a terminal chunk with `usage` and (usually) empty `choices`.
+  // Anthropic: `message_start` carries the real input_tokens, `message_delta`
+  // carries the real output_tokens — two frames, one figure each.
+  //
+  // `message_start` ALSO carries `output_tokens: 1`, and that 1 is a
+  // placeholder, not a measurement — the answer has not been generated yet.
+  // Recording it makes a stream cut short before `message_delta` report
+  // `completionTokens: 1`, a confident figure where we took no reading at all,
+  // which is exactly the invented number `usage()` returns `null` to avoid.
+  // So the completion half of a `message_start` frame is DROPPED; the input
+  // half, which is a real count, is kept.
+  const isMessageStart = raw.type === 'message_start';
+  const usage = asObject(raw.usage) ?? asObject(asObject(raw.message)?.usage);
+  if (usage !== null) {
+    const prompt = numberOrNull(usage.prompt_tokens) ?? numberOrNull(usage.input_tokens);
+    const completion = isMessageStart
+      ? null
+      : numberOrNull(usage.completion_tokens) ?? numberOrNull(usage.output_tokens);
+    const total = isMessageStart ? null : numberOrNull(usage.total_tokens);
+    if (prompt !== null) state.promptTokens = prompt;
+    if (completion !== null) state.completionTokens = completion;
+    if (total !== null) state.totalTokens = total;
+  }
+
+  // ---- finish reason -----------------------------------------------------
+  const choices = raw.choices;
+  if (Array.isArray(choices) && choices.length > 0) {
+    const first = asObject(choices[0]);
+    if (first !== null && typeof first.finish_reason === 'string') {
+      state.finishReason = first.finish_reason;
+    }
+  }
+  const stopReason =
+    asObject(raw.delta)?.stop_reason ?? asObject(raw.message)?.stop_reason ?? raw.stop_reason;
+  if (typeof stopReason === 'string') state.finishReason = stopReason;
+
+  // ---- tool calls, OPENAI: indexed fragments on `delta.tool_calls` --------
+  if (Array.isArray(choices) && choices.length > 0) {
+    const delta = asObject(asObject(choices[0])?.delta);
+    const calls = delta?.tool_calls;
+    if (Array.isArray(calls)) {
+      for (const entry of calls) {
+        const call = asObject(entry);
+        if (call === null) continue;
+        const slot = toolSlot(state, numberOrNull(call.index) ?? unindexedToolSlot(state, call.id));
+        if (typeof call.id === 'string') slot.id = call.id;
+        const fn = asObject(call.function);
+        if (fn !== null) {
+          if (typeof fn.name === 'string') slot.name = fn.name;
+          // Concatenated, never replaced: the arguments arrive in fragments.
+          if (typeof fn.arguments === 'string') slot.arguments += fn.arguments;
+        }
+      }
+    }
+  }
+
+  // ---- tool calls, ANTHROPIC: a tool_use block plus input_json_delta ------
+  if (raw.type === 'content_block_start') {
+    const block = asObject(raw.content_block);
+    if (block !== null && block.type === 'tool_use') {
+      const slot = toolSlot(state, numberOrNull(raw.index) ?? state.toolCalls.size);
+      if (typeof block.id === 'string') slot.id = block.id;
+      if (typeof block.name === 'string') slot.name = block.name;
+    }
+  }
+  if (raw.type === 'content_block_delta') {
+    const delta = asObject(raw.delta);
+    if (delta !== null && delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+      // Only join onto a slot a `content_block_start` actually opened — a
+      // fragment for a block we never saw start belongs to no tool call.
+      //
+      // When the wire omits `index`, fall back to the slot most recently
+      // opened, exactly as `content_block_start` above falls back rather than
+      // refusing. Requiring an index on both halves would have been consistent;
+      // requiring it on only ONE was not — the start opened a slot the delta
+      // could never reach, so every argument fragment of an unindexed block was
+      // dropped in silence and the call surfaced with a name and no arguments,
+      // which reads as a tool invoked with none.
+      const index = numberOrNull(raw.index) ?? lastOpenedToolSlot(state);
+      if (index !== null && state.toolCalls.has(index)) {
+        state.toolCalls.get(index)!.arguments += delta.partial_json;
+      }
+    }
+  }
+}
+
 function extractDelta(raw: Record<string, unknown>): string {
   if (typeof raw.delta === 'string') return raw.delta;
   if (typeof raw.delta === 'object' && raw.delta !== null) {

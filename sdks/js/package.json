@@ -1,6 +1,6 @@
 {
   "name": "@nrouter_ai/sdk",
-  "version": "3.0.0",
+  "version": "3.1.2",
   "description": "nRouter SDK — one API key for models across six provider clouds. Native OpenAI and Anthropic wire formats, plus embeddings, audio, images and video.",
   "license": "MIT",
   "engines": {
@@ -18,9 +18,16 @@
   },
   "files": [
     "dist",
-    "docs",
-    "!docs/live-sdk-agent-report.md",
-    "!docs/test-coverage-and-issues.md"
+    "docs/README.md",
+    "docs/audio.md",
+    "docs/cost.md",
+    "docs/errors.md",
+    "docs/guardrails.md",
+    "docs/images.md",
+    "docs/memory.md",
+    "docs/prompts.md",
+    "docs/routing.md",
+    "docs/video.md"
   ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc && node -e \"require('node:fs').copyFileSync('src/index.mjs','dist/index.mjs')\"",
@@ -45,11 +52,11 @@
   "homepage": "https://nrouter.ai",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nRouterAI/nrouter-sdk.git",
+    "url": "git+https://github.com/nRouterGateway/nrouter-sdk.git",
     "directory": "sdks/js"
   },
   "bugs": {
-    "url": "https://github.com/nRouterAI/nrouter-sdk/issues"
+    "url": "https://github.com/nRouterGateway/nrouter-sdk/issues"
   },
   "publishConfig": {
     "access": "public"

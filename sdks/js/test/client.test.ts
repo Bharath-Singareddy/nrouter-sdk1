@@ -381,6 +381,77 @@ test('post-header stalls are bounded while active response bodies remain open', 
   assert.equal((active.body.choices as any[])[0].message.content, 'ok');
 });
 
+// PGSDK-113. A server that went SILENT is not a caller who pressed cancel, and
+// the difference decides whether the SDK is allowed to try again.
+//
+// The backstop used to name its error `TimeoutError`, which is a member of
+// `ABORT_NAMES` because that is what `AbortSignal.timeout()` produces. So
+// `wasAborted` said true, `isRetryable` returned false, and a 130-second
+// upstream stall — the single most retryable failure this transport can see —
+// was reported to the caller as their own cancellation. The name has to be one
+// no runtime hands to an abort.
+test('a body-idle stall is a TRANSPORT failure, never read as the caller cancelling', async () => {
+  let stalled!: ReadableStreamDefaultController<Uint8Array>;
+  const { isAbortLike } = require('../dist/errors');
+  const client = new nRouter({
+    apiKey: TEST_KEY,
+    bodyIdleTimeoutMs: 60,
+    fetch: async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            stalled = controller;
+            controller.enqueue(new TextEncoder().encode('{"choices":'));
+          },
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'x-nr-request-id': 'idle-retry' },
+        },
+      ),
+  });
+  try {
+    await assert.rejects(
+      Promise.race([
+        client.nr.chat({ model: 'm', prompt: 'x' }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('body stall was left unbounded')), 1000),
+        ),
+      ]),
+      (err: unknown) => {
+        const error = err as Error & { cause?: unknown; requestId?: string; kind?: string };
+        assert.ok(
+          error instanceof nRouterError,
+          'the stall must surface as a classified nRouterError',
+        );
+        assert.equal(
+          error.kind,
+          'transport',
+          'the request left this process and got no usable answer — that is `transport`',
+        );
+        assert.equal(
+          error.requestId,
+          'idle-retry',
+          'the gateway request id must survive so the stall is traceable',
+        );
+        assert.ok(
+          !isAbortLike(error) && !isAbortLike(error.cause),
+          'a silent server is not a cancellation: naming the backstop `TimeoutError` puts it in ABORT_NAMES',
+        );
+        assert.equal(
+          isRetryable(error),
+          true,
+          'an idle upstream is the most retryable failure this transport sees; ' +
+            'classified as an abort it is permanently non-retryable',
+        );
+        return true;
+      },
+    );
+  } finally {
+    stalled.error(new Error('test cleanup'));
+  }
+});
+
 // Byte bodies must reach the wire as bytes. HISTORY, because the shape of this
 // test changed with the dependency and the reason did not: under openai 4 the
 // client JSON-stringified a Uint8Array into {"0":82,"1":73,…} unless
@@ -1076,6 +1147,35 @@ test('extractTraceHeaders and withTraceContext handle trace headers and sanitiza
   assert.equal(headers['Custom-Header'], undefined); // sanitized CRLF
 });
 
+// PGSDK-118 — a CR/LF in traceId/sessionId used to skip the header silently:
+// no header, no error, no warning, so a developer wiring tracing could not
+// correlate a request with its spend row and had nothing to debug.
+test('a traceId or sessionId containing CR/LF is REFUSED, not silently dropped', () => {
+  for (const [option, opts] of [
+    ['traceId', { traceId: 'tr_bad\r\ninjected' }],
+    ['sessionId', { sessionId: 'sess_bad\ninjected' }],
+  ] as const) {
+    assert.throws(
+      () => new nRouter({ apiKey: TEST_KEY, ...opts }),
+      (err: any) =>
+        err.name === 'nRouterConfigurationError' && String(err.message).includes(option),
+      `${option} with CR/LF must throw a configuration error naming the option`,
+    );
+  }
+
+  for (const [option, ctx] of [
+    ['traceId', { traceId: 'tr_bad\r\ninjected' }],
+    ['sessionId', { sessionId: 'sess_bad\ninjected' }],
+  ] as const) {
+    assert.throws(
+      () => withTraceContext({}, ctx),
+      (err: any) =>
+        err.name === 'nRouterConfigurationError' && String(err.message).includes(option),
+      `withTraceContext must refuse a ${option} with CR/LF`,
+    );
+  }
+});
+
 test('traceId and sessionId are forwarded in pinnedFetch', async () => {
   let seenHeaders: Headers | undefined;
   const client = new nRouter({
@@ -1095,5 +1195,53 @@ test('traceId and sessionId are forwarded in pinnedFetch', async () => {
   assert.equal(seenHeaders?.get('x-nr-trace-id'), 'tr_client_999');
   assert.equal(seenHeaders?.get('x-nr-session-id'), 'sess_client_888');
   assert.equal(seenHeaders?.get('x-nr-client-language'), 'js');
+});
+
+// PGSDK-118, the other half. The constructor validates `traceId`/`sessionId`
+// and the request path then asserted they were "known header-safe" — but it
+// RE-READ the caller's own `options` object on every call, so the invariant
+// was only true until the caller touched its own variable. MEASURED before the
+// fix: mutating `options.traceId` to a CR/LF value after construction threw
+// from inside `Headers.set`, the vendor wrapped it as `Connection error.`, and
+// `isRetryable` answered TRUE — a permanent mistake in the caller's own input
+// dressed as a transient network fault, which is precisely the anti-pattern
+// this client fixes for `apiKey` a few lines above.
+//
+// The fix is a SNAPSHOT, not another validation pass: the two values are
+// per-client configuration with no setter and no rotation story (unlike
+// `apiKey`, which is late-bound deliberately), so the value that was validated
+// is the value that goes on the wire.
+test('trace context is snapshotted at construction, not re-read from caller-owned options', async () => {
+  let seenHeaders: Headers | undefined;
+  const options: any = {
+    apiKey: TEST_KEY,
+    traceId: 'tr_snapshot',
+    sessionId: 'sess_snapshot',
+    fetch: async (_url: unknown, init: any) => {
+      seenHeaders = new Headers(init.headers);
+      return new Response(JSON.stringify({ choices: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  };
+  const client = new nRouter(options);
+
+  // The caller mutates ITS OWN object after construction — legal, and nothing
+  // in the API says it re-configures a live client.
+  options.traceId = 'tr_bad\r\nX-Injected: 1';
+  options.sessionId = 'sess_bad\ninjected';
+
+  await client.nr.chat({ model: 'm', prompt: 'hi' });
+  assert.equal(
+    seenHeaders?.get('x-nr-trace-id'),
+    'tr_snapshot',
+    'the validated construction-time traceId is what goes on the wire',
+  );
+  assert.equal(
+    seenHeaders?.get('x-nr-session-id'),
+    'sess_snapshot',
+    'the validated construction-time sessionId is what goes on the wire',
+  );
 });
 

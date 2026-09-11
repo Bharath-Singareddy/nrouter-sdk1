@@ -2,8 +2,8 @@
 
 [![PyPI](https://img.shields.io/pypi/v/nrouter-sdk?logo=pypi&logoColor=white&label=nrouter-sdk)](https://pypi.org/project/nrouter-sdk/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/nrouter-sdk.svg)](https://pypi.org/project/nrouter-sdk/)
-[![CI](https://github.com/nRouterAI/nrouter-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/nRouterAI/nrouter-sdk/actions/workflows/ci.yml)
-[![PyPI publish](https://github.com/nRouterAI/nrouter-sdk/actions/workflows/publish-pypi.yml/badge.svg)](https://github.com/nRouterAI/nrouter-sdk/actions/workflows/publish-pypi.yml)
+[![CI](https://github.com/nRouterGateway/nrouter-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/nRouterGateway/nrouter-sdk/actions/workflows/ci.yml)
+[![PyPI publish](https://github.com/nRouterGateway/nrouter-sdk/actions/workflows/publish-pypi.yml/badge.svg)](https://github.com/nRouterGateway/nrouter-sdk/actions/workflows/publish-pypi.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 The official Python client library for the [nRouter](https://nrouter.ai) LLM gateway.
@@ -107,18 +107,18 @@ asyncio.run(main())
 
 | Example Script | Topic | Description |
 |---|---|---|
-| [`01_quickstart.py`](../../examples/python/01_quickstart.py) | **Quickstart** | Basic chat completion & metadata extraction |
-| [`02_async_concurrency.py`](../../examples/python/02_async_concurrency.py) | **Async / Concurrency** | Concurrent requests with `asyncio.gather` |
-| [`03_streaming.py`](../../examples/python/03_streaming.py) | **Streaming** | Server-Sent Events (SSE) token streaming |
-| [`04_anthropic_messages.py`](../../examples/python/04_anthropic_messages.py) | **Anthropic Messages** | Native Messages format & token counting |
-| [`05_metadata_cost_tracking.py`](../../examples/python/05_metadata_cost_tracking.py) | **Metadata & Cost** | Deep dive into `x-nr-*` headers |
-| [`06_prompt_templates.py`](../../examples/python/06_prompt_templates.py) | **Prompt Templates** | Server-side prompt templates & variables |
-| [`07_tool_calling.py`](../../examples/python/07_tool_calling.py) | **Tool Calling** | Function calling with JSON schema tools |
-| [`08_structured_outputs.py`](../../examples/python/08_structured_outputs.py) | **Structured Outputs** | Strict JSON object output formatting |
-| [`09_error_handling.py`](../../examples/python/09_error_handling.py) | **Error Handling** | Typed error handling & guardrail recovery |
-| [`10_conversation_memory.py`](../../examples/python/10_conversation_memory.py) | **Memory** | Multi-turn memory without header leaks |
-| [`11_embeddings.py`](../../examples/python/11_embeddings.py) | **Embeddings** | Vector embeddings generation |
-| [`12_multimodal_vision.py`](../../examples/python/12_multimodal_vision.py) | **Multimodal Vision** | Image inputs via URL or base64 |
+| [`01_quickstart.py`](demo/01_quickstart.py) | **Quickstart** | Basic chat completion & metadata extraction |
+| [`02_async_concurrency.py`](demo/02_async_concurrency.py) | **Async / Concurrency** | Concurrent requests with `asyncio.gather` |
+| [`03_streaming.py`](demo/03_streaming.py) | **Streaming** | Server-Sent Events (SSE) token streaming |
+| [`04_anthropic_messages.py`](demo/04_anthropic_messages.py) | **Anthropic Messages** | Native Messages format & token counting |
+| [`05_metadata_cost_tracking.py`](demo/05_metadata_cost_tracking.py) | **Metadata & Cost** | Deep dive into `x-nr-*` headers |
+| [`06_prompt_templates.py`](demo/06_prompt_templates.py) | **Prompt Templates** | Server-side prompt templates & variables |
+| [`07_tool_calling.py`](demo/07_tool_calling.py) | **Tool Calling** | Function calling with JSON schema tools |
+| [`08_structured_outputs.py`](demo/08_structured_outputs.py) | **Structured Outputs** | Strict JSON object output formatting |
+| [`09_error_handling.py`](demo/09_error_handling.py) | **Error Handling** | Typed error handling & guardrail recovery |
+| [`10_conversation_memory.py`](demo/10_conversation_memory.py) | **Memory** | Multi-turn memory without header leaks |
+| [`11_embeddings.py`](demo/11_embeddings.py) | **Embeddings** | Vector embeddings generation |
+| [`12_multimodal_vision.py`](demo/12_multimodal_vision.py) | **Multimodal Vision** | Image inputs via URL or base64 |
 
 ### 📓 Interactive Jupyter Notebook
 Try the SDK interactively with [`notebooks/quickstart.ipynb`](../../notebooks/quickstart.ipynb).
@@ -254,6 +254,32 @@ print("Budget Warning:    ", meta.budget_warning)     # "org soft_budget 80.00/1
 
 > **Note on Cost Accuracy:** Unpriced models return `cost=None` and `cost_status="unpriced"`. Never treat `None` as `$0.00` — free routes (like `/v1/messages/count_tokens`) emit no cost header, while billable inferences always track usage.
 
+### 6. Autonomous Agents (Native nRouter SDK)
+
+Build autonomous, multi-turn agents combining function calling, conversation memory, and telemetry with **zero external framework dependencies** (no LangChain, AutoGen, CrewAI, or raw OpenAI packages needed):
+
+```python
+from nroutersdk import nRouter, create_memory
+
+# Client-side multi-turn memory
+memory = create_memory()
+
+# Autonomous agent loop using native nRouter client
+with nRouter() as client:
+    response = client.chat.completions.create(
+        model="gpt-5.4-mini",
+        messages=await memory.messages(),
+        tools=TOOLS,
+    )
+    # Every turn automatically captures exact USD cost and latency
+    meta = client.last_response
+    print(f"Cost: ${meta.cost:.6f} | Request ID: {meta.request_id}")
+```
+
+Runnable demos:
+- [`sdks/python/demo/agent.py`](demo/agent.py): Complete autonomous agent with dynamic tool dispatch, guardrail protection, and per-turn spend telemetry (`--dry-run` and `--live`).
+- [`sdks/python/demo/13_multi_agent_workflow.py`](demo/13_multi_agent_workflow.py): Role-based multi-agent collaboration (Researcher + Writer) with independent memory states and spend tracking.
+
 ---
 
 ## Error Handling
@@ -325,11 +351,19 @@ http_client = httpx.Client(
     timeout=httpx.Timeout(60.0, connect=10.0),
 )
 
-with nRouter(http_client=http_client, max_retries=3) as client:
+# `max_retries` is deliberately left at its default of 0. A retry on a text wire
+# is a second provider call and a second BILL for one answer, and a value set on
+# the client applies to every method — this SDK cannot split retries by method
+# the way the JS one does.
+with nRouter(http_client=http_client) as client:
     response = client.chat.completions.create(
         model="gpt-5.4-mini",
         messages=[{"role": "user", "content": "Hello behind enterprise proxy!"}],
     )
+
+# Retries are safe on idempotent GETs, so ask for them per call rather than
+# arming them client-wide:
+#     client.with_options(max_retries=2).models.list()
 ```
 
 ---
@@ -355,9 +389,63 @@ All endpoints route through `https://api.nrouter.ai/v1`:
 
 ---
 
+## How guardrails, budgets and routing work
+
+They are configured in the dashboard and enforced at the **gateway**, not in
+this package. The useful guarantee is not that they are always on — it is that
+**whatever you have enabled cannot be bypassed by a client**, this one
+included, and behaves identically from every nRouter SDK and from raw `curl`.
+
+- [Guardrails](https://nrouter.ai/docs/guides/guardrails) — PII redaction,
+  injection protection, secret and keyword scanning, pre-call and post-call.
+  Which ones run is resolved per request: the organization's guardrail switch
+  first, then the narrowest applicable assignment wins across
+  key > team > org > default, and a winner disabled at that scope does not run.
+- [Budget controls](https://nrouter.ai/docs/guides/budget-controls) — spend
+  limits per key, team and organization.
+- [Observability](https://nrouter.ai/docs/guides/observability) — cost and usage
+  on billable calls. Free routes are genuinely free and carry no
+  `x-nr-request-cost`: `/v1/messages/count_tokens`, and video polling and
+  content retrieval.
+
+[Smart Router aliases and fallback chains](https://nrouter.ai/docs/guides/router-settings)
+carry two conditions worth knowing before you rely on failover you have not
+enabled:
+
+- **Opt-in by what you put in `model`.** An alias gets the strategy and its
+  chain; a concrete model is never re-routed and inherits no hidden fallback.
+- **Text wires only** — chat completions, responses, messages and legacy
+  completions. Audio, image and video calls take a single-provider route and
+  are not cross-provider Smart Router wires.
+
+---
+
+## Demos & Examples
+
+Runnable demonstrations live in [`demo/`](demo/):
+- [Core Demos](demo/) — quickstart, async concurrency, streaming, Anthropic messages, tool calling, structured outputs, memory, embeddings, and multimodal vision.
+- [Autonomous Agents](demo/agent.py) — complete native agents with multi-turn memory, tools, and telemetry.
+- [Multi-Agent Workflow](demo/13_multi_agent_workflow.py) — role-based collaboration.
+- [Framework Integrations](demo/frameworks/) — LangChain, LlamaIndex, CrewAI, AutoGen, and Instructor.
+- [Demo Documentation](demo/README.md) — complete execution instructions.
+
+## Validation Playbook
+
+This SDK maintains a repeatable 18-step verification process:
+- [Validation Playbook](docs/validation-playbook.md) — comprehensive end-to-end verification runbook.
+
+## Open-Source Standards & License
+
+- **License:** [MIT License](../../LICENSE)
+- **Repository:** [nRouterGateway/nrouter-sdk](https://github.com/nRouterGateway/nrouter-sdk)
+- **Issue Tracker:** [GitHub Issues](https://github.com/nRouterGateway/nrouter-sdk/issues)
+
+---
+
 ## Documentation & Resources
 
 * [nRouter Documentation](https://nrouter.ai/docs)
+* [Smart Router: aliases, strategies and fallback chains](https://nrouter.ai/docs/guides/router-settings)
 * [API Reference](https://nrouter.ai/docs/api-reference)
 * [Python Quickstart Guide](https://nrouter.ai/docs/sdks/python)
 * [Live Model Catalog](https://nrouter.ai/models)

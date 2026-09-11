@@ -97,7 +97,9 @@ export interface nRouterErrorOptions {
 export function redactKeys(message: string): string {
   return message
     .replace(/(sk-nrouter-)[A-Za-z0-9._-]{6,}/g, '$1***')
-    .replace(/(sk-)(?!nrouter-)[A-Za-z0-9._-]{6,}/g, '$1***');
+    .replace(/(sk-)(?!nrouter-)[A-Za-z0-9._-]{6,}/g, '$1***')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [REDACTED]')
+    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+/g, '[REDACTED_JWT]');
 }
 
 /**
@@ -462,7 +464,10 @@ export function isAbortLike(err: unknown): boolean {
   const name = (err as { name?: unknown }).name;
   if (typeof name === 'string' && ABORT_NAMES.has(name)) return true;
   const ctor = (err as { constructor?: { name?: unknown } }).constructor;
-  return typeof ctor?.name === 'string' && ABORT_NAMES.has(ctor.name);
+  if (typeof ctor?.name === 'string' && ABORT_NAMES.has(ctor.name)) return true;
+  const code = (err as { code?: unknown }).code;
+  if (code === 20 || code === 'ABORT_ERR') return true;
+  return false;
 }
 
 /** Walk a cause chain looking for an abort, bounded so a cycle cannot hang the caller. */
@@ -662,7 +667,19 @@ export interface BackoffOptions {
 /**
  * Computes a jittered exponential backoff in milliseconds.
  *
- * Honors Retry-After when present and positive, bounded by maxDelayMs.
+ * A positive Retry-After is a FLOOR, never a candidate for clamping: the
+ * server named the moment it will accept traffic again, and `maxDelayMs` is
+ * our ceiling on OUR guesswork, not a licence to ignore the server's. Jitter
+ * therefore only lengthens that wait — clamping it to `maxDelayMs` and then
+ * multiplying by a sub-1 jitter turned `Retry-After: 3600` into a 15-30s
+ * wait, i.e. a retry at or before the moment the server refused.
+ *
+ * The exponential arm is the opposite case — our own guess — so there jitter
+ * shortens and `maxDelayMs` bounds.
+ *
+ * The ONE bound the Retry-After arm keeps is `MAX_RETRY_AFTER_SECONDS`, which
+ * is not a ceiling on the server's authority but on JavaScript's timer: see
+ * the note at the clamp itself.
  * Clamps attempt to 30 to prevent 2^N numeric overflow.
  * Jitter factor distributes delays to prevent thundering herd.
  */
@@ -673,8 +690,20 @@ export function computeJitteredBackoff(options: BackoffOptions): number {
   const jitterFactor = Math.max(0, Math.min(options.jitterFactor ?? 0.5, 1.0));
 
   if (typeof options.retryAfterSeconds === 'number' && Number.isFinite(options.retryAfterSeconds) && options.retryAfterSeconds > 0) {
-    const retryMs = Math.min(options.retryAfterSeconds * 1000, maxDelayMs);
-    const jitterMultiplier = (1 - jitterFactor) + Math.random() * jitterFactor;
+    // `maxDelayMs` does not bound this arm — but `MAX_RETRY_AFTER_SECONDS`
+    // must, and for a reason that has nothing to do with our guesswork.
+    // `setTimeout` holds its delay in a 32-bit signed int, so a delay above
+    // 2147483647 ms fires on the next tick instead: an UNBOUNDED floor
+    // inverts into an immediate retry against the limit that just refused
+    // us — the exact failure the floor exists to prevent. A finite input can
+    // reach that state two ways: `Number.MAX_VALUE * 1000` is `Infinity`, and
+    // anything past ~24.8 days is a finite overflow. This is the same ceiling
+    // `parseRetryAfter` already applies to a header, so no value the gateway
+    // can send is shortened by it.
+    const boundedSeconds = Math.min(options.retryAfterSeconds, MAX_RETRY_AFTER_SECONDS);
+    const retryMs = boundedSeconds * 1000;
+    // Upward only: [1.0, 1.0 + jitterFactor).
+    const jitterMultiplier = 1 + Math.random() * jitterFactor;
     return Math.max(0, Math.round(retryMs * jitterMultiplier));
   }
 
@@ -722,9 +751,12 @@ export function withResponse(
 ): nRouterError {
   if (status !== null) err.status = status;
   if (meta) {
-    err.requestId = meta.requestId;
-    err.limitSource = meta.limitSource;
-    err.authReason = meta.authReason;
+    // `??`, never `=`: a response whose headers omitted one of these must not
+    // ERASE the value the transport already supplied. The constructor reads
+    // `options.requestId ?? meta?.requestId ?? null` for the same reason.
+    err.requestId = meta.requestId ?? err.requestId;
+    err.limitSource = meta.limitSource ?? err.limitSource;
+    err.authReason = meta.authReason ?? err.authReason;
   }
   return err;
 }
@@ -744,7 +776,13 @@ export function isSpecErrorCode(value: unknown): value is string {
 
 /**
  * A 2xx body that is really a refusal. Returns null for anything that could be
- * a genuine response — see the SDK-026 note above for why this is conservative.
+ * a genuine response.
+ *
+ * Deliberately conservative: a completion-shaped key (`choices`, `data`,
+ * `content`, `output`, `id`, `object`, `usage`) beside the error node means a
+ * real, BILLED response that happens to carry an error field, and turning that
+ * into a thrown error would discard an answer the customer paid for. False
+ * negatives here cost a missed refusal; false positives cost a paid response.
  */
 export function errorEnvelopeOnSuccess(
   decoded: unknown,
@@ -795,8 +833,10 @@ const MAX_CAUSE_DEPTH = 8;
  *
  * Bounded by depth AND by an identity set, so a cause cycle — which undici and
  * several HTTP clients do produce — cannot spin here.
+ *
+ * @internal
  */
-function sanitizeCause(cause: unknown, depth = 0, seen: Set<unknown> = new Set()): unknown {
+export function sanitizeCause(cause: unknown, depth = 0, seen: Set<unknown> = new Set()): unknown {
   if (depth >= MAX_CAUSE_DEPTH) return undefined;
   if (typeof cause === 'string') return redactKeys(cause);
   if (typeof cause !== 'object' || cause === null) return undefined;

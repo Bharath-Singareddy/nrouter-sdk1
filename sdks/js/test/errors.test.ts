@@ -30,6 +30,7 @@ const {
   computeJitteredBackoff,
   ERROR_CLASS_BY_CODE,
   ERROR_STATUS_BY_CODE,
+  MAX_RETRY_AFTER_SECONDS,
 } = errors;
 
 /** spec/nrouter-sdk-spec.json — the Rule #14 source of truth, four levels up. */
@@ -364,13 +365,60 @@ test('computeJitteredBackoff adheres to bounds, clamps attempts, and prioritizes
   const delayRetry = computeJitteredBackoff({ attempt: 0, retryAfterSeconds: 5, maxDelayMs: 10000, jitterFactor: 0 });
   assert.equal(delayRetry, 5000);
 
-  // Retry-After capped by maxDelayMs
-  const delayRetryCapped = computeJitteredBackoff({ attempt: 0, retryAfterSeconds: 20, maxDelayMs: 10000, jitterFactor: 0 });
-  assert.equal(delayRetryCapped, 10000);
+  // Retry-After is a FLOOR, not a candidate for maxDelayMs clamping: the
+  // server named the moment it will accept traffic again, and maxDelayMs is
+  // OUR ceiling on OUR guesswork, not a licence to ignore it.
+  const delayRetryOverMax = computeJitteredBackoff({ attempt: 0, retryAfterSeconds: 20, maxDelayMs: 10000, jitterFactor: 0 });
+  assert.equal(delayRetryOverMax, 20000);
 
   // Jitter distribution produces value within [min, max]
   const jittered = computeJitteredBackoff({ attempt: 1, baseDelayMs: 1000, jitterFactor: 0.4 });
   assert.ok(jittered >= 1200 && jittered <= 2000, `jittered ${jittered} should be within [1200, 2000]`);
+});
+
+test('a Retry-After is never shortened by jitter or by maxDelayMs', () => {
+  // A long refusal (Retry-After: 3600) must not come back as a 15-30s wait.
+  for (let i = 0; i < 200; i += 1) {
+    const delay = computeJitteredBackoff({
+      attempt: 0,
+      retryAfterSeconds: 3600,
+      maxDelayMs: 30000,
+      jitterFactor: 0.5,
+    });
+    assert.ok(
+      delay >= 3600 * 1000,
+      `retry at ${delay}ms would fire before the server's Retry-After of 3600000ms`,
+    );
+    assert.ok(
+      delay <= 3600 * 1000 * 1.5,
+      `jitter must stay bounded above the floor, got ${delay}ms`,
+    );
+  }
+});
+
+test('an absurd Retry-After still yields a delay a real timer can hold', () => {
+  // Removing maxDelayMs from the Retry-After arm made the floor unbounded, and
+  // an unbounded floor inverts itself: `setTimeout` takes a 32-bit signed
+  // delay, so anything above 2^31-1 ms — `Infinity` included — is silently
+  // reduced to 1ms and the "server-defined floor" becomes an immediate retry
+  // against the limit that just refused us. Measured: `Number.MAX_VALUE * 1000`
+  // is `Infinity`, and Node logs TimeoutOverflowWarning then fires at 1ms.
+  const TIMER_MAX_MS = 2147483647;
+  const floorMs = MAX_RETRY_AFTER_SECONDS * 1000;
+  for (const seconds of [Number.MAX_VALUE, 1e9, TIMER_MAX_MS / 1000 + 1]) {
+    const delay = computeJitteredBackoff({ attempt: 0, retryAfterSeconds: seconds, jitterFactor: 0.5 });
+    assert.ok(Number.isFinite(delay), `retryAfterSeconds=${seconds} produced a non-finite delay ${delay}`);
+    assert.ok(
+      delay <= TIMER_MAX_MS,
+      `retryAfterSeconds=${seconds} produced ${delay}ms, which setTimeout reduces to 1ms`,
+    );
+    // The bound is a CEILING on an unreasonable input, never a shortening
+    // below the 24h ceiling parseRetryAfter itself already applies.
+    assert.ok(
+      delay >= floorMs,
+      `retryAfterSeconds=${seconds} produced ${delay}ms, below our own ${floorMs}ms cap`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -611,3 +659,39 @@ test('parseGatewayErrorEnvelope extracts param and type fields', () => {
 });
 
 
+
+// ---------------------------------------------------------------------------
+// withResponse — stamps what the response told us, and ERASES NOTHING.
+// ---------------------------------------------------------------------------
+
+test('withResponse never erases metadata the transport already supplied', () => {
+  const { withResponse } = errors;
+  const err = createError('boom', {
+    status: null,
+    requestId: 'req_from_transport',
+    limitSource: 'key',
+    authReason: 'key_blocked',
+  });
+  // A response whose headers carried none of the three.
+  const meta = { requestId: null, limitSource: null, authReason: null } as any;
+  withResponse(err, 429, meta);
+  assert.equal(err.status, 429);
+  assert.equal(err.requestId, 'req_from_transport',
+    'a header-less response must not erase the request id the transport knew');
+  assert.equal(err.limitSource, 'key');
+  assert.equal(err.authReason, 'key_blocked');
+
+  // A response that DOES carry them still wins.
+  withResponse(err, 429, { requestId: 'req_from_headers', limitSource: 'org', authReason: null } as any);
+  assert.equal(err.requestId, 'req_from_headers');
+  assert.equal(err.limitSource, 'org');
+  assert.equal(err.authReason, 'key_blocked');
+});
+
+test('no doc comment points at a note that does not exist in this file', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'errors.ts'), 'utf8');
+  assert.ok(
+    !/SDK-026 note above/.test(source),
+    'errors.ts cites an "SDK-026 note above" that is nowhere in the file',
+  );
+});

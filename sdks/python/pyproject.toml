@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nrouter-sdk"
-version = "3.0.0"
+version = "3.1.2"
 description = "nRouter SDK — one API key for models across six provider clouds. Native OpenAI and Anthropic wire formats, plus embeddings, audio, images and video."
 readme = "README.md"
 license = "MIT"
@@ -50,13 +50,14 @@ dev = [
     "pytest-asyncio>=0.24",
     "mypy>=1.11",
     "ruff>=0.6",
+    "pyyaml>=6.0",
 ]
 
 [project.urls]
 Homepage = "https://nrouter.ai"
 Documentation = "https://nrouter.ai/docs"
-Repository = "https://github.com/nRouterAI/nrouter-sdk"
-Issues = "https://github.com/nRouterAI/nrouter-sdk/issues"
+Repository = "https://github.com/nRouterGateway/nrouter-sdk"
+Issues = "https://github.com/nRouterGateway/nrouter-sdk/issues"
 
 # Distribution name is `nrouter-sdk`; the import package stays `nroutersdk`.
 # Hatchling cannot infer that from the project name, so name it explicitly —
@@ -79,3 +80,7 @@ ignore_missing_imports = true
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]

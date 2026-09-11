@@ -10,19 +10,25 @@ import ipaddress
 from typing import TYPE_CHECKING, Any, Mapping, cast
 from urllib.parse import quote, urlparse
 
-try:
-    import openai._base_client as _oai_base
-    _httpx = getattr(_oai_base, "httpx", None)
-except Exception:
-    _httpx = None
-
-if _httpx is None:
+if TYPE_CHECKING:
     try:
-        import httpx2 as _httpx
+        import httpx2 as httpx
     except ImportError:
-        import httpx as _httpx  # type: ignore[no-redef]
+        import httpx as httpx  # type: ignore[no-redef]
+else:
+    try:
+        import openai._base_client as _oai_base
+        _httpx = getattr(_oai_base, "httpx2", getattr(_oai_base, "httpx", None))
+    except (ImportError, AttributeError):
+        _httpx = None
 
-httpx = _httpx
+    if _httpx is None:
+        try:
+            import httpx2 as _httpx
+        except ImportError:
+            import httpx as _httpx  # type: ignore[no-redef]
+
+    httpx = _httpx
 from openai import APIStatusError
 from openai import AsyncOpenAI as _AsyncOpenAI
 from openai import OpenAI as _OpenAI
@@ -266,8 +272,8 @@ def extract_trace_headers(meta: Any) -> dict[str, str]:
             kl = str(k).lower()
             if kl in ("x-nr-request-id", "x-nr-trace-id", "x-nr-session-id"):
                 out[kl] = str(v)
-    elif hasattr(meta, "headers") and isinstance(getattr(meta, "headers"), Mapping):
-        for k, v in getattr(meta, "headers").items():
+    elif hasattr(meta, "headers") and isinstance(meta.headers, Mapping):
+        for k, v in meta.headers.items():
             kl = str(k).lower()
             if kl in ("x-nr-request-id", "x-nr-trace-id", "x-nr-session-id"):
                 out[kl] = str(v)
@@ -464,6 +470,25 @@ def _maybe_raise_nrouter_error(err: APIStatusError) -> None:
             type=error_type,
         ) from err
 
+    if status in (502, 504):
+        # 502 & 504 are ordinary gateway outcomes for upstream/sandbox timeouts.
+        # "upstream response was too large to process" is permanent and stays base class.
+        if "too large" in message.lower():
+            raise nRouterError(
+                message,
+                request_id=request_id,
+                status_code=status,
+                param=param,
+                type=error_type,
+            ) from err
+        raise nRouterServiceError(
+            message,
+            request_id=request_id,
+            status_code=status,
+            param=param,
+            type=error_type,
+        ) from err
+
     if status == 500 or status == 503:
         raise nRouterServiceError(
             message,
@@ -488,6 +513,20 @@ class _nRouterModels:
     def list(self) -> dict:
         """List all models available through nRouter."""
         return cast(dict, self._c._nrouter_get("/v1/models"))
+
+    def capabilities(self) -> Any:
+        """Fetch the gateway's self-described capabilities from /capabilities."""
+        return self._c._nrouter_get("/capabilities")
+
+    def providers(self) -> Any:
+        """List the distinct upstream providers available through this gateway."""
+        res = self.capabilities()
+        if asyncio.iscoroutine(res):
+            async def _providers():
+                caps = await res
+                return caps.get("providers", []) if isinstance(caps, dict) else []
+            return _providers()
+        return res.get("providers", []) if isinstance(res, dict) else []
 
 
 def _messages_payload(
@@ -1101,6 +1140,17 @@ class nRouter(_OpenAI):
         """Poll a video generation job until completed or failed."""
         return self.videos.wait_for(video_id, poll_interval=poll_interval, timeout=timeout)
 
+    def capabilities(self) -> dict:
+        """Fetch gateway capabilities and served endpoints."""
+        # The delegate is deliberately -> Any: it serves both the sync and async
+        # clients and returns a coroutine for the latter. This wrapper is the
+        # sync half, so the concrete type is known here and nowhere above.
+        return cast(dict, self.nrouter_models.capabilities())
+
+    def providers(self) -> list[str]:
+        """List the distinct upstream providers available through this gateway."""
+        return cast("list[str]", self.nrouter_models.providers())
+
 
 # ---------------------------------------------------------------------------
 # Async client
@@ -1277,6 +1327,16 @@ class AsyncnRouter(_AsyncOpenAI):
         """Poll a video generation job until completed or failed."""
         return await self.videos.wait_for(video_id, poll_interval=poll_interval, timeout=timeout)
 
+    async def capabilities(self) -> dict:
+        """Fetch gateway capabilities and served endpoints."""
+        # See the sync twin: the delegate is -> Any because it serves both
+        # clients; awaiting it here is what fixes the type.
+        return cast(dict, await self.nrouter_models.capabilities())
+
+    async def providers(self) -> list[str]:
+        """List the distinct upstream providers available through this gateway."""
+        return cast("list[str]", await self.nrouter_models.providers())
+
 
 def parse_sse(raw: str) -> list[dict[str, str]]:
     """Parse a block of SSE text into its events.
@@ -1300,8 +1360,7 @@ def parse_sse(raw: str) -> list[dict[str, str]]:
                 field, value = line.split(":", 1)
             else:
                 field, value = line, ""
-            if value.startswith(" "):
-                value = value[1:]
+            value = value.removeprefix(" ")
             if field == "data":
                 data_lines.append(value)
             elif field == "event":

@@ -1,7 +1,6 @@
 [package]
 name = "nrouter"
-version = "3.0.0"
-publish = false
+version = "3.1.2"
 edition = "2021"
 # The EFFECTIVE floor of the transitive graph, not an aspiration. `cargo
 # metadata` reports dependencies declaring up to 1.88 (icu_*), and
@@ -12,7 +11,7 @@ rust-version = "1.88"
 description = "nRouter SDK — one API key for models across six provider clouds"
 license = "MIT"
 homepage = "https://nrouter.ai"
-repository = "https://github.com/nRouterAI/nrouter-sdk"
+repository = "https://github.com/nRouterGateway/nrouter-sdk"
 documentation = "https://docs.rs/nrouter"
 readme = "README.md"
 keywords = ["llm", "ai", "openai", "gateway", "anthropic"]

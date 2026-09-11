@@ -212,7 +212,6 @@ func FormatError(err error) string {
 	return RedactKeys(err.Error())
 }
 
-
 // Unwrap exposes the sentinel so errors.Is matches on the condition, AND the
 // underlying cause so errors.Is(err, context.Canceled) still matches through
 // it. Multi-error Unwrap needs Go 1.20; go.mod declares 1.21.
@@ -240,6 +239,9 @@ func (e *Error) IsRetryable() bool {
 	if errors.Is(e.Cause, context.Canceled) || errors.Is(e.Cause, context.DeadlineExceeded) {
 		return false
 	}
+	if strings.Contains(strings.ToLower(e.Message), "too large") {
+		return false
+	}
 	if e.Status == 408 || e.Status == 425 {
 		return true
 	}
@@ -247,11 +249,11 @@ func (e *Error) IsRetryable() bool {
 }
 
 func configErr(format string, args ...any) *Error {
-	return &Error{Kind: KindConfiguration, Message: fmt.Sprintf(format, args...)}
+	return &Error{Kind: KindConfiguration, Message: RedactKeys(fmt.Sprintf(format, args...))}
 }
 
 func transportErr(format string, args ...any) *Error {
-	return &Error{Kind: KindTransport, Message: fmt.Sprintf(format, args...)}
+	return &Error{Kind: KindTransport, Message: RedactKeys(fmt.Sprintf(format, args...))}
 }
 
 // classify turns a gateway refusal into a Kind.

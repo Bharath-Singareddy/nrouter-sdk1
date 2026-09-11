@@ -2,7 +2,7 @@
 """Prove every documented snippet calls a wire the gateway serves for its model.
 
 Two independent failures live in the same corpus (`README.md`, `LANGUAGES.md`,
-`examples/**`, `sdks/*/README.md`, `sdks/*/docs/**`), and both ship as
+`sdks/*/demo/**`, `sdks/*/README.md`, `sdks/*/docs/**`), and both ship as
 copy-pasteable code:
 
 1. **Wire mismatch.** The gateway resolves a provider endpoint per wire, and a
@@ -40,8 +40,22 @@ ROOT = Path(__file__).resolve().parent.parent
 # Customer-facing prose and runnable examples. SDK *source* is deliberately out
 # of scope: `check_conformance.py` holds that to the spec.
 DOC_FILES = ("README.md", "LANGUAGES.md")
-DOC_GLOBS = ("examples/**/*", "sdks/*/README.md", "sdks/*/docs/**/*")
+DOC_GLOBS = (
+    "sdks/*/demo/**/*",
+    "sdks/*/README.md",
+    "sdks/*/docs/**/*",
+    "docs/**/*",
+)
 SKIP_PARTS = {"node_modules", ".git", "target", "build", "dist", ".dart_tool"}
+# Internal audit evidence is not a copy-pasteable SDK example. Treating its
+# prose table as executable documentation creates false positives when a model
+# name and a wire name happen to occur within the scan window.
+SKIP_FILES = {
+    "js-100-issue-evidence.md",
+    "live-js-sdk-validation-2026-09-02.md",
+    "live-sdk-agent-report.md",
+    "test-coverage-and-issues.md",
+}
 
 # --- what counts as an Anthropic-family model id ----------------------------
 ANTHROPIC_MODEL = re.compile(r"(?:anthropic/[A-Za-z0-9._-]+|\bclaude-[A-Za-z0-9._-]+)")
@@ -135,6 +149,8 @@ def _iter_files(root: Path) -> list[Path]:
                 continue
             if SKIP_PARTS & set(path.relative_to(root).parts):
                 continue
+            if path.name in SKIP_FILES:
+                continue
             seen[path] = None
     return list(seen)
 
@@ -168,7 +184,7 @@ def classify(lines: list[str], index: int) -> str | None:
 def check_doc_wires(root: Path = ROOT, spec: dict | None = None) -> list[str]:
     """Return a list of failure strings; empty means every snippet is callable."""
     if spec is None:
-        spec = json.loads((root / "spec" / "nrouter-sdk-spec.json").read_text())
+        spec = json.loads((root / "spec" / "nrouter-sdk-spec.json").read_text(encoding="utf-8"))
     unsupported = sorted(spec.get("unsupported_endpoints", {}))
     unsupported_paths = re.compile(
         r"/v1/(?:" + "|".join(re.escape(name) for name in unsupported) + r")\b"
@@ -177,7 +193,7 @@ def check_doc_wires(root: Path = ROOT, spec: dict | None = None) -> list[str]:
     failures: list[str] = []
     for path in _iter_files(root):
         try:
-            lines = path.read_text().splitlines()
+            lines = path.read_text(encoding="utf-8").splitlines()
         except (UnicodeDecodeError, OSError):
             continue
         rel = path.relative_to(root)
@@ -243,11 +259,11 @@ _SPEC = {"unsupported_endpoints": {"moderations": "not mounted"}}
 
 def _fixture(tmp: Path, readme: str, example: str = "") -> Path:
     root = tmp / "repo"
-    (root / "examples" / "curl").mkdir(parents=True, exist_ok=True)
+    (root / "docs" / "curl").mkdir(parents=True, exist_ok=True)
     (root / "spec").mkdir(parents=True, exist_ok=True)
     (root / "README.md").write_text(readme)
     (root / "LANGUAGES.md").write_text("# Languages\n")
-    (root / "examples" / "curl" / "quickstart.sh").write_text(example or "#!/bin/sh\n")
+    (root / "docs" / "curl" / "quickstart.sh").write_text(example or "#!/bin/sh\n")
     (root / "spec" / "nrouter-sdk-spec.json").write_text(json.dumps(_SPEC))
     return root
 

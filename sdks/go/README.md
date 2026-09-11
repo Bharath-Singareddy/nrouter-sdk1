@@ -1,19 +1,19 @@
 # nRouter SDK for Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/nRouterAI/nrouter-sdk/sdks/go/v3.svg)](https://pkg.go.dev/github.com/nRouterAI/nrouter-sdk/sdks/go/v3)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/nRouterAI/nrouter-sdk/blob/main/LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/nRouterGateway/nrouter-sdk/sdks/go/v3.svg)](https://pkg.go.dev/github.com/nRouterGateway/nrouter-sdk/sdks/go/v3)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/nRouterGateway/nrouter-sdk/blob/main/LICENSE)
 
 One API key for models across six provider clouds — Alibaba US, OpenAI, AWS
 Bedrock, Azure Foundry, Google Vertex AI and Anthropic. The gateway serves the
 OpenAI wire format and Anthropic's Messages API natively, plus embeddings,
 audio, images and video.
 
-**Documentation & Package Reference:** [pkg.go.dev/github.com/nRouterAI/nrouter-sdk/sdks/go/v3](https://pkg.go.dev/github.com/nRouterAI/nrouter-sdk/sdks/go/v3)
+**Documentation & Package Reference:** [pkg.go.dev/github.com/nRouterGateway/nrouter-sdk/sdks/go/v3](https://pkg.go.dev/github.com/nRouterGateway/nrouter-sdk/sdks/go/v3)
 
 ## Installation
 
 ```bash
-go get github.com/nRouterAI/nrouter-sdk/sdks/go/v3@v3.0.0
+go get github.com/nRouterGateway/nrouter-sdk/sdks/go/v3@v3.1.2
 ```
 
 ## Authentication & Setup
@@ -34,7 +34,7 @@ import (
 	"fmt"
 	"log"
 
-	nrouter "github.com/nRouterAI/nrouter-sdk/sdks/go/v3"
+	nrouter "github.com/nRouterGateway/nrouter-sdk/sdks/go/v3"
 )
 
 func main() {
@@ -66,7 +66,7 @@ func main() {
 
 ## Why not just point the OpenAI Go SDK at the gateway
 
-You can, and [`examples/go/quickstart.go`](../../examples/go/quickstart.go) shows exactly that — it
+You can, and [`demo/quickstart.go`](demo/quickstart.go) shows exactly that — it
 keeps working and stays supported. The vendor client owns its own transport and
 discards the raw response, so the `x-nr-*` metadata is out of reach without
 `.WithRawResponse()` plumbing at every call site. This SDK exists for the
@@ -221,3 +221,20 @@ enabled:
   are not cross-provider Smart Router wires.
 - [Go quickstart](https://nrouter.ai/docs/sdks/go) and the
   [API reference](https://nrouter.ai/docs/api-reference).
+
+## Demos & Examples
+
+Runnable demonstrations live in [`demo/`](demo/):
+- [Quickstart Demo](demo/quickstart.go) — demonstrates Go client creation, streaming, and error handling.
+- [Demo Documentation](demo/README.md) — run instructions.
+
+## Validation Playbook
+
+This SDK maintains a repeatable 18-step verification process:
+- [Validation Playbook](docs/validation-playbook.md) — comprehensive end-to-end verification runbook.
+
+## Open-Source Standards & License
+
+- **License:** [MIT License](../../LICENSE)
+- **Repository:** [nRouterGateway/nrouter-sdk](https://github.com/nRouterGateway/nrouter-sdk)
+- **Issue Tracker:** [GitHub Issues](https://github.com/nRouterGateway/nrouter-sdk/issues)

@@ -19,7 +19,7 @@ const assert = require('node:assert/strict');
 const { inspect } = require('node:util');
 
 const { parseSSE, streamChat, isAbortError } = require('../dist/stream');
-const { nRouterError, isRetryable, transportError } = require('../dist/errors');
+const { nRouterError, isRetryable, transportError, nRouterRateLimitError, nRouterServiceError } = require('../dist/errors');
 
 const encoder = new TextEncoder();
 
@@ -353,8 +353,9 @@ test('a stream that ends without [DONE] is refused, not reported complete', asyn
     },
     (err: unknown) => {
       assert.ok(err instanceof nRouterError, 'a typed error');
-      assert.equal(isRetryable(err), true, 'the same request can succeed next time');
+      assert.equal(isRetryable(err), false, 'retrying issues a new billed request, so it must not auto-retry');
       assert.match((err as Error).message, /\[DONE\]/);
+      assert.match((err as Error).message, /Retrying issues a NEW billed request/);
       return true;
     },
   );
@@ -461,6 +462,810 @@ test('a CUSTOM abort reason is still a cancellation, not a retryable failure', a
     },
   );
 });
+
+test('a socket failure caused by abort is normalized to an AbortError (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"a"}}]}\n\n');
+        controller.abort();
+        // Emulate socket drop upon abort (e.g. node fetch or undici socket hang up)
+        throw new Error('socket hang up');
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true, 'socket hang up on aborted signal must be recognized as abort');
+      assert.equal(isRetryable(err), false, 'an aborted request is never retryable');
+      const cause = (err as Error & { cause?: unknown }).cause;
+      assert.ok(cause instanceof Error, 'underlying socket error preserved as cause');
+      assert.equal((cause as Error).message, 'socket hang up');
+      return true;
+    },
+  );
+});
+
+test('a stream cut off mid-answer preserves requestId and meta on the truncation error (PGSDK-112)', async () => {
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'x-nr-request-id': 'req-trunc-456' },
+      body: (async function* () {
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"part"}}]}\n\n');
+        // connection closes without [DONE]
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' });
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof nRouterError);
+      assert.equal((err as nRouterError).kind, 'other');
+      assert.equal((err as nRouterError).requestId, 'req-trunc-456');
+      assert.ok((err as nRouterError).meta);
+      assert.equal((err as nRouterError).meta?.requestId, 'req-trunc-456');
+      assert.equal(isRetryable(err), false, 'retrying issues a new billed request, so it must not auto-retry');
+      return true;
+    },
+  );
+});
+
+test('an abort error preserves the original custom reason without mutating caller reason (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const customReason = new Error('caller cancelled');
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'x-nr-request-id': 'req-abort-789' },
+      body: (async function* () {
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"a"}}]}\n\n');
+        controller.abort(customReason);
+        // Throw a real runtime AbortError (DOMException) as runtime fetch would
+        const abortErr =
+          typeof DOMException !== 'undefined'
+            ? new DOMException('The operation was aborted', 'AbortError')
+            : Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+        throw abortErr;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true, 'must be recognised as AbortError');
+      assert.equal(isRetryable(err), false, 'an abort is never retryable');
+      assert.equal((err as Error).message, 'caller cancelled');
+      const cause = (err as Error & { cause?: unknown }).cause;
+      assert.ok(cause instanceof Error);
+      assert.equal((cause as Error).message, 'caller cancelled');
+      assert.equal((cause as Error).name, 'Error');
+      assert.equal(customReason.name, 'Error', 'caller reason must not be mutated');
+      assert.equal(Object.prototype.propertyIsEnumerable.call(err, 'cause'), false, 'cause must not be enumerable own property');
+      assert.equal((err as { requestId?: string }).requestId, 'req-abort-789', 'requestId preserved on abort error');
+      return true;
+    },
+  );
+});
+
+test('an abort with structured object reason preserves object in cause (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const structuredReason = { code: 'USER_NAVIGATED', view: '/chat' };
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"a"}}]}\n\n');
+        controller.abort(structuredReason);
+        throw new Error('stream dropped');
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      const cause = (err as Error & { cause?: unknown }).cause;
+      assert.deepEqual(cause, structuredReason, 'structured object reason preserved in cause');
+      return true;
+    },
+  );
+});
+
+test('a retryable in-band nRouterError becomes non-retryable and preserves metadata when signal is aborted (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'x-nr-request-id': 'req-retry-rate-limit' },
+      body: (async function* () {
+        // Unterminated event delivered in tail buffer, aborted as body ends
+        yield new TextEncoder().encode(
+          'event: error\ndata: {"error":{"code":"rate_limit_exceeded","message":"rate limit hit"}}',
+        );
+        controller.abort();
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof nRouterError, 'must stay inside nRouterError hierarchy');
+      assert.equal((err as nRouterError).kind, 'rate_limit', 'must preserve classified kind');
+      assert.equal((err as nRouterError).requestId, 'req-retry-rate-limit', 'requestId preserved');
+      assert.equal(isRetryable(err), false, 'aborted stream must NOT be retryable even on rate_limit');
+      return true;
+    },
+  );
+});
+
+test('a standard abort preserves requestId and metadata without mutating caller signal (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'x-nr-request-id': 'req-std-abort' },
+      body: (async function* () {
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n');
+        controller.abort();
+        throw new Error('connection severed');
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      assert.equal((err as { requestId?: string }).requestId, 'req-std-abort');
+      assert.equal((err as { status?: number }).status, 200);
+      assert.equal(isRetryable(err), false);
+      const cause = (err as Error & { cause?: unknown }).cause;
+      assert.ok(cause instanceof Error);
+      assert.equal((cause as Error).message, 'connection severed');
+      assert.equal((controller.signal.reason as { requestId?: unknown })?.requestId, undefined, 'signal.reason must not be mutated');
+      assert.equal((controller.signal as { requestId?: unknown }).requestId, undefined, 'signal must not be mutated');
+      return true;
+    },
+  );
+});
+
+test('a custom AbortError reason message is preserved on transport failure (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const customAbort = new DOMException('custom timeout error', 'AbortError');
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"a"}}]}\n\n');
+        controller.abort(customAbort);
+        throw new Error('socket hang up');
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      assert.equal((err as Error).message, 'custom timeout error', 'custom AbortError message preserved');
+      const cause = (err as Error & { cause?: unknown }).cause;
+      assert.ok(cause instanceof Error);
+      assert.equal((cause as Error).message, 'custom timeout error');
+      assert.equal((cause as Error).name, 'AbortError');
+      assert.equal((customAbort as { cause?: unknown }).cause, undefined, 'caller custom abort was not mutated');
+      return true;
+    },
+  );
+});
+
+test('a standard fetch DOMException abort carries metadata without mutating signal.reason (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'x-nr-request-id': 'req-fetch-abort' },
+      body: (async function* () {
+        controller.abort();
+        throw controller.signal.reason;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      assert.equal((err as { requestId?: string }).requestId, 'req-fetch-abort', 'standard fetch abort carries requestId');
+      assert.equal((err as { status?: number }).status, 200, 'standard fetch abort carries status');
+      assert.equal(isRetryable(err), false);
+      const cause = (err as Error & { cause?: unknown }).cause;
+      assert.ok(cause instanceof Error);
+      assert.equal((cause as Error).name, 'AbortError');
+      assert.equal((controller.signal.reason as { requestId?: unknown })?.requestId, undefined, 'caller signal.reason was not mutated');
+      return true;
+    },
+  );
+});
+
+test('an explicit abort during stream drain takes precedence over truncation error (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"chunk"}}]}\n\n');
+        controller.abort();
+        // Stream terminates normally here without sending [DONE]
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true, 'caller abort must take precedence over truncation');
+      assert.equal(isRetryable(err), false, 'an abort is never retryable');
+      return true;
+    },
+  );
+});
+
+test('a DOMException AbortError preserves error name and message in cause (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const domErr = new DOMException('The user aborted a request.', 'AbortError');
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"a"}}]}\n\n');
+        controller.abort(domErr);
+        throw domErr;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      const cause = (err as Error & { cause?: unknown }).cause;
+      assert.ok(cause instanceof Error);
+      assert.equal((cause as Error).name, 'AbortError');
+      assert.equal((cause as Error).message, 'The user aborted a request.');
+      assert.equal(isAbortError(err), true);
+      assert.equal(isRetryable(err), false);
+      assert.equal((domErr as { requestId?: unknown }).requestId, undefined, 'caller DOMException not mutated');
+      return true;
+    },
+  );
+});
+
+test('an aborted stream sanitizes leaky cause to prevent Authorization header leak (Rule #5, PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const leaky: Error & { request?: unknown } = new Error('socket hang up');
+  leaky.request = { headers: { authorization: 'Bearer sk-nrouter-secrettail1234' } };
+
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        controller.abort();
+        throw leaky;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      const rendered = inspect(err, { depth: 10 });
+      assert.ok(!rendered.includes('secrettail1234'), `secret leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('Bearer'), `Bearer leaked:\n${rendered}`);
+      return true;
+    },
+  );
+});
+
+test('APIUserAbortError preserves constructor abort name and non-retryability (PGSDK-112)', async () => {
+  class APIUserAbortError extends Error {
+    constructor() {
+      super('Request was aborted.');
+      this.name = 'Error'; // OpenAI client leaves name as 'Error'
+    }
+  }
+
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        throw new APIUserAbortError();
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' });
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      assert.equal((err as Error).name, 'APIUserAbortError');
+      assert.equal(isRetryable(err), false);
+      return true;
+    },
+  );
+});
+
+test('transport abort error with generic Error name preserves AbortError name and non-retryability (PGSDK-112)', async () => {
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        const err = new Error('The user aborted a request.');
+        err.name = 'Error';
+        (err as any).code = 20;
+        throw err;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' });
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      assert.equal((err as Error).name, 'AbortError');
+      assert.equal(isRetryable(err), false);
+      return true;
+    },
+  );
+});
+
+test('aborting with an nRouterRateLimitError reason preserves nRouterError hierarchy and non-retryability (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const callerError = new nRouterRateLimitError('too fast');
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        controller.abort(callerError);
+        throw controller.signal.reason;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof nRouterRateLimitError, 'preserves nRouterRateLimitError hierarchy');
+      assert.equal(isRetryable(err), false, 'wasAborted causes isRetryable to return false');
+      assert.equal((callerError as { cause?: unknown }).cause, undefined, 'caller error must not be mutated');
+      const cause = (err as Error & { cause?: unknown }).cause;
+      assert.ok(cause instanceof Error);
+      assert.equal((cause as Error).name, 'AbortError');
+      return true;
+    },
+  );
+});
+
+test('in-band nRouterError preserves structured object reason and pre-existing cause chain (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const structuredReason = { code: 'CLIENT_ABORT', detail: 'user closed dialog' };
+  const upstreamCause = new Error('circuit breaker open');
+  const classifiedErr = new nRouterServiceError('upstream unavailable', { cause: upstreamCause });
+  const initialCause = classifiedErr.cause;
+
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        controller.abort(structuredReason);
+        throw classifiedErr;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof nRouterServiceError);
+      assert.equal(isRetryable(err), false);
+      assert.equal(classifiedErr.cause, initialCause, 'in-band error cause must not be mutated');
+      assert.equal((classifiedErr.cause as Error).message, 'circuit breaker open');
+      const marker = (err as Error & { cause?: any }).cause;
+      assert.equal(marker?.name, 'AbortError');
+      assert.deepEqual(marker?.reason, structuredReason, 'structured reason preserved');
+      assert.ok(marker?.cause instanceof Error, 'upstream cause preserved as Error');
+      assert.equal((marker?.cause as Error).message, 'circuit breaker open');
+      assert.equal((marker?.cause as Error).name, 'Error');
+      return true;
+    },
+  );
+});
+
+test('a custom abort message redacts embedded API keys (Rule #5, PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        controller.abort(new Error('cancelled token sk-nrouter-leakedsecret123'));
+        throw controller.signal.reason;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      const rendered = inspect(err, { depth: 10 });
+      assert.ok(!rendered.includes('leakedsecret123'), `secret leaked:\n${rendered}`);
+      assert.ok((err as Error).message.includes('sk-nrouter-***'), 'token must be masked');
+      return true;
+    },
+  );
+});
+
+test('in-band nRouterError with Error abort reason never mutates caller signal.reason and chains causes (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const callerError = new Error('caller abort reason');
+  const upstreamCause = new Error('upstream failure');
+  const classifiedErr = new nRouterServiceError('service failure', { cause: upstreamCause });
+  const initialCause = classifiedErr.cause;
+
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        controller.abort(callerError);
+        throw classifiedErr;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof nRouterServiceError);
+      assert.equal(isRetryable(err), false);
+      assert.equal((callerError as { cause?: unknown }).cause, undefined, 'caller error must not be mutated');
+      assert.equal(classifiedErr.cause, initialCause, 'in-band error cause must not be mutated');
+      assert.equal((classifiedErr.cause as Error).message, 'upstream failure');
+
+      const marker = (err as Error & { cause?: any; reason?: any }).cause;
+      assert.equal(marker?.name, 'AbortError');
+      assert.ok(marker?.reason instanceof Error, 'abort reason attached to marker.reason');
+      assert.equal(marker?.reason?.message, 'caller abort reason');
+      assert.ok(marker?.cause instanceof Error, 'upstream cause preserved as cause');
+      assert.equal(marker?.cause?.message, 'upstream failure');
+      return true;
+    },
+  );
+});
+
+test('structured abort reasons strip sensitive keys case-insensitively and preserve sanitized arrays and nested errors (Rule #5, PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const sharedTagObj = { name: 'shared-tag-value' };
+  const structuredReason = {
+    Authorization: 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.doNotLeakThisJWT',
+    SECRET: 'topsecret',
+    access_token: 'opaque-access-token-1234',
+    accessToken: 'camel-access-token-1234',
+    client_secret: 'oauth-client-secret-5678',
+    clientSecret: 'camel-client-secret-5678',
+    auth_token: 'raw-auth-token-9012',
+    authToken: 'camel-auth-token-9012',
+    refresh_token: 'refresh-token-3456',
+    refreshToken: 'camel-refresh-token-3456',
+    private_key: 'private-key-material',
+    privateKey: 'camel-private-key',
+    apiKey: 'camel-api-key',
+    session_token: 'sess-token-7890',
+    sessionToken: 'camel-session-token',
+    requestId: 'req-allowed-1234',
+    request_id: 'req-allowed-5678',
+    tags: ['allowed-tag', 'key sk-nrouter-leakedarraytoken'],
+    counts: [1, 2, 3],
+    nestedError: new Error('nested failure sk-nrouter-nestedleak'),
+    nestedBearerError: new Error('nested bearer Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.nestedJWTSecret'),
+    matrix: [['matrix-item', 'Bearer opaque-matrix-token']],
+    abortedAt: new Date('2026-09-08T20:00:00.000Z'),
+    refA: sharedTagObj,
+    refB: sharedTagObj,
+  };
+
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        controller.abort(structuredReason);
+        throw controller.signal.reason;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      const rendered = inspect(err, { depth: 10 });
+      assert.ok(!rendered.includes('doNotLeakThisJWT'), `JWT leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('nestedJWTSecret'), `nested JWT leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('topsecret'), `SECRET leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('opaque-access-token-1234'), `access_token leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('camel-access-token-1234'), `accessToken leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('oauth-client-secret-5678'), `client_secret leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('camel-client-secret-5678'), `clientSecret leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('raw-auth-token-9012'), `auth_token leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('camel-auth-token-9012'), `authToken leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('refresh-token-3456'), `refresh_token leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('camel-refresh-token-3456'), `refreshToken leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('private-key-material'), `private_key leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('camel-private-key'), `privateKey leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('camel-api-key'), `apiKey leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('sess-token-7890'), `session_token leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('camel-session-token'), `sessionToken leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('leakedarraytoken'), `array token leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('nestedleak'), `nested error token leaked:\n${rendered}`);
+      assert.ok(!rendered.includes('opaque-matrix-token'), `matrix bearer leaked:\n${rendered}`);
+      assert.ok(rendered.includes('sk-nrouter-***'), 'token in array must be masked');
+      assert.ok(rendered.includes('allowed-tag'), 'non-sensitive array element preserved');
+      assert.ok(rendered.includes('matrix-item'), 'non-sensitive matrix element preserved');
+      assert.ok(rendered.includes('2026-09-08T20:00:00.000Z'), 'Date serialized as ISO string');
+      const cause = (err as Error & { cause?: Record<string, any> }).cause;
+      assert.equal(cause?.refA?.name, 'shared-tag-value');
+      assert.equal(cause?.refB?.name, 'shared-tag-value', 'repeated reference preserved across siblings');
+      assert.equal(cause?.requestId, 'req-allowed-1234', 'requestId preserved');
+      assert.equal(cause?.request_id, 'req-allowed-5678', 'request_id preserved');
+      return true;
+    },
+  );
+});
+
+test('top-level array and Date abort reasons are sanitized without object corruption (PGSDK-112)', async () => {
+  // Test top-level array
+  const controllerArray = new AbortController();
+  const runnerArray = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        controllerArray.abort(['top-item', 'Bearer secret-bearer-token', 'sk-nrouter-leakedarray3']);
+        throw controllerArray.signal.reason;
+      })(),
+    }),
+  };
+  const resArray = await streamChat(runnerArray as never, { model: 'm', prompt: 'x' }, controllerArray.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of resArray.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      const cause = (err as Error & { cause?: unknown }).cause;
+      assert.ok(Array.isArray(cause), 'top-level array preserved as Array');
+      assert.equal((cause as any[])[0], 'top-item');
+      assert.equal((cause as any[])[1], 'Bearer [REDACTED]');
+      assert.equal((cause as any[])[2], 'sk-nrouter-***');
+      return true;
+    },
+  );
+
+  // Test top-level Date
+  const controllerDate = new AbortController();
+  const dateVal = new Date('2026-09-08T21:00:00.000Z');
+  const runnerDate = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        controllerDate.abort(dateVal);
+        throw controllerDate.signal.reason;
+      })(),
+    }),
+  };
+  const resDate = await streamChat(runnerDate as never, { model: 'm', prompt: 'x' }, controllerDate.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of resDate.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      const cause = (err as Error & { cause?: unknown }).cause;
+      assert.equal(cause, '2026-09-08T21:00:00.000Z', 'top-level Date serialized as ISO string');
+      return true;
+    },
+  );
+});
+
+test('cloneNRouterError preserves non-enumerable requestId, status, and meta on aborted stream (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: {
+        'content-type': 'text/event-stream',
+        'x-nr-request-id': 'req-runner-header-ignore',
+        'x-nr-model': 'runner-model-ignore',
+      },
+      body: (async function* () {
+        controller.abort(new Error('client canceled mid-flight'));
+        const err = new nRouterServiceError('gateway error', {
+          requestId: 'req-clone-1234',
+          status: 503,
+          meta: { model: 'gpt-4o', provider: 'azure' },
+        });
+        Object.defineProperty(err, 'customNonEnum', {
+          value: 'preserved-custom-marker',
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        });
+        throw err;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof nRouterServiceError);
+      assert.equal((err as nRouterServiceError).requestId, 'req-clone-1234', 'requestId preserved on clone from err');
+      assert.equal((err as nRouterServiceError).status, 503, 'status preserved on clone from err');
+      assert.equal((err as nRouterServiceError).meta?.model, 'gpt-4o', 'meta preserved on clone from err');
+      assert.equal((err as any).customNonEnum, 'preserved-custom-marker', 'custom non-enumerable property preserved on clone');
+      assert.equal(isRetryable(err), false);
+      return true;
+    },
+  );
+});
+
+test('sanitizeStructuredReason preserves nested objects up to depth limit without premature doubling (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  // Nesting 5 levels deep: obj.l1.l2.l3.l4.deepProperty
+  const nestedReason = {
+    l1: {
+      l2: {
+        l3: {
+          l4: {
+            deepProperty: 'deepVal',
+          },
+        },
+      },
+    },
+  };
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        controller.abort(nestedReason);
+        throw controller.signal.reason;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      const cause = (err as Error & { cause?: any }).cause;
+      assert.ok(cause?.l1?.l2?.l3?.l4?.deepProperty, 'level 4 nested object preserved');
+      assert.equal(cause.l1.l2.l3.l4.deepProperty, 'deepVal');
+      return true;
+    },
+  );
+});
+
+test('un-aborted stream failures with non-Error throws are wrapped as transportError not AbortError (PGSDK-112)', async () => {
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        throw 'raw socket dropped string';
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' });
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), false, 'non-abort string throw must not be classified as AbortError');
+      assert.ok(err instanceof nRouterError, 'wrapped in nRouterError');
+      assert.ok((err as Error).message.includes('raw socket dropped string'));
+      return true;
+    },
+  );
+});
+
+test('empty error abort reason falls back to default message rather than empty string (PGSDK-112)', async () => {
+  const controller = new AbortController();
+  const runner = {
+    open: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: (async function* () {
+        controller.abort(new Error(''));
+        throw controller.signal.reason;
+      })(),
+    }),
+  };
+  const res = await streamChat(runner as never, { model: 'm', prompt: 'x' }, controller.signal);
+  await assert.rejects(
+    async () => {
+      for await (const _ of res.chunks) { /* drain */ }
+    },
+    (err: unknown) => {
+      assert.equal(isAbortError(err), true);
+      assert.equal((err as Error).message, 'the request was aborted');
+      return true;
+    },
+  );
+});
+
 
 // HTTP header names are case-insensitive on the wire, and a hand-written
 // runner returning a plain object reasonably spells it `Retry-After`. An exact
@@ -579,7 +1384,8 @@ test('a Claude stream cut before message_stop is still reported as truncated', a
   const err = await rejection(result.text());
   assert.ok(err instanceof nRouterError);
   assert.match(err.message, /truncated/);
-  assert.equal(isRetryable(err), true);
+  assert.equal(err.code, 'stream_truncated', 'must carry stream_truncated code');
+  assert.equal(isRetryable(err), false);
 });
 
 test('an OpenAI stream asks for the usage chunk it would otherwise never get', async () => {
@@ -626,4 +1432,257 @@ test('an in-band Anthropic error frame still cuts the stream', async () => {
   const result = await streamChat(runner, { model: 'claude-sonnet-4-5', prompt: 'hi' });
   const err = await rejection(result.text());
   assert.equal(err.name, 'nRouterGuardrailBlockedError');
+});
+
+// ---------------------------------------------------------------------------
+// PGSDK-116 — an explicit `error: null` is NOT an in-band error.
+// ---------------------------------------------------------------------------
+
+test('a frame carrying an explicit error: null is content, not an in-band error', async () => {
+  // Some upstreams stamp `"error": null` on every chunk. `!== undefined` takes
+  // the error branch on it and discards a billed answer mid-flight.
+  const withNullError =
+    `data: ${JSON.stringify({ error: null, choices: [{ delta: { content: 'hi' } }] })}\n\n`;
+  const result = await streamChat(chunkRunner([withNullError, DONE]), { model: 'm', prompt: 'hi' });
+  assert.equal(await result.text(), 'hi');
+});
+
+test('a frame carrying an explicit error: false is content, not an in-band error', async () => {
+  // `false != null` is TRUE in JavaScript, so the nullish guard took the error
+  // branch on a frame that reported NO error, discarding a billed answer
+  // mid-flight and handing the caller the whole raw frame as the message.
+  const withFalseError =
+    `data: ${JSON.stringify({ error: false, choices: [{ delta: { content: 'hi' } }] })}\n\n`;
+  const result = await streamChat(chunkRunner([withFalseError, DONE]), { model: 'm', prompt: 'hi' });
+  assert.equal(await result.text(), 'hi');
+});
+
+test('a frame carrying a REAL error object still stops the stream', async () => {
+  const withError =
+    `data: ${JSON.stringify({ error: { type: 'guardrail_blocked', message: 'denied' } })}\n\n`;
+  const result = await streamChat(chunkRunner([withError, DONE]), { model: 'm', prompt: 'hi' });
+  const err = await rejection(result.text());
+  assert.ok(err instanceof nRouterError, `expected a typed error, got ${inspect(err)}`);
+});
+
+// ---------------------------------------------------------------------------
+// PGSDK-117 — usage / finishReason / toolCalls, normalized across both wires.
+// ---------------------------------------------------------------------------
+
+test('usage(), finishReason() and toolCalls() read the OPENAI wire', async () => {
+  const frames = [
+    `data: ${JSON.stringify({ choices: [{ delta: { content: 'hel' } }] })}\n\n`,
+    `data: ${JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'get_weather', arguments: '{"city":' } }] } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"Paris"}' } }] }, finish_reason: 'tool_calls' }],
+    })}\n\n`,
+    `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 } })}\n\n`,
+    DONE,
+  ];
+  const result = await streamChat(chunkRunner(frames), { model: 'm', prompt: 'hi' });
+  await result.text();
+
+  assert.deepEqual(await result.usage(), { promptTokens: 11, completionTokens: 7, totalTokens: 18 });
+  assert.equal(await result.finishReason(), 'tool_calls');
+  assert.deepEqual(await result.toolCalls(), [
+    { id: 'call_1', name: 'get_weather', arguments: '{"city":"Paris"}' },
+  ]);
+});
+
+test('OPENAI tool-call fragments that omit index join ONE call, never shard', async () => {
+  // Some OpenAI-compatible upstreams omit `index` entirely. The fallback was
+  // `state.toolCalls.size`, which is 0 for the first fragment and 1 for the
+  // second — so ONE call's arguments landed in two slots as two un-parseable
+  // halves, the second with a null id and a null name. A caller cannot invoke
+  // that, and `JSON.parse` on either half throws.
+  const frames = [
+    `data: ${JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ id: 'call_1', function: { name: 'get_weather', arguments: '{"city":' } }] } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ function: { arguments: '"Paris"}' } }] }, finish_reason: 'tool_calls' }],
+    })}\n\n`,
+    DONE,
+  ];
+  const result = await streamChat(chunkRunner(frames), { model: 'm', prompt: 'hi' });
+  await result.text();
+
+  assert.deepEqual(await result.toolCalls(), [
+    { id: 'call_1', name: 'get_weather', arguments: '{"city":"Paris"}' },
+  ]);
+});
+
+test('an unindexed fragment carrying a NEW id opens the NEXT tool-call slot', async () => {
+  // Joining is only correct for fragments of the SAME call. Without an index
+  // the id is the one boundary the wire gives us, so a fragment announcing a
+  // different id must not be concatenated onto the previous call's arguments.
+  const frames = [
+    `data: ${JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ id: 'call_1', function: { name: 'a', arguments: '{"x":1}' } }] } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ id: 'call_2', function: { name: 'b', arguments: '{"y":2}' } }] } }],
+    })}\n\n`,
+    DONE,
+  ];
+  const result = await streamChat(chunkRunner(frames), { model: 'm', prompt: 'hi' });
+  await result.text();
+
+  assert.deepEqual(await result.toolCalls(), [
+    { id: 'call_1', name: 'a', arguments: '{"x":1}' },
+    { id: 'call_2', name: 'b', arguments: '{"y":2}' },
+  ]);
+});
+
+test('usage(), finishReason() and toolCalls() read the ANTHROPIC wire', async () => {
+  const frames = [
+    `data: ${JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 11 } } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'get_weather' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"city":' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '"Paris"}' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 7 } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
+  ];
+  const result = await streamChat(chunkRunner(frames), { model: 'm', prompt: 'hi' });
+  await result.text();
+
+  assert.deepEqual(await result.usage(), { promptTokens: 11, completionTokens: 7, totalTokens: 18 });
+  assert.equal(await result.finishReason(), 'tool_use');
+  assert.deepEqual(await result.toolCalls(), [
+    { id: 'toolu_1', name: 'get_weather', arguments: '{"city":"Paris"}' },
+  ]);
+});
+
+test('a stream that reported no usage says null, never zero', async () => {
+  const result = await streamChat(chunkRunner([frame('hi'), DONE]), { model: 'm', prompt: 'hi' });
+  await result.text();
+  assert.equal(await result.usage(), null, 'zero tokens would be a measurement we never took');
+  assert.equal(await result.finishReason(), null);
+  assert.deepEqual(await result.toolCalls(), []);
+});
+
+// ---------------------------------------------------------------------------
+// Review round — the four sentinels, the placeholder count, and the two
+// unindexed fragment paths.
+// ---------------------------------------------------------------------------
+
+test('a frame carrying an explicit error: 0 is content, not an in-band error', async () => {
+  // `0` is the THIRD way an upstream says "no error on this chunk" (errno 0),
+  // and `0 != null && 0 !== false` is TRUE, so the sentinel guard cut a billed
+  // stream on a frame that reported success.
+  const withZeroError =
+    `data: ${JSON.stringify({ error: 0, choices: [{ delta: { content: 'hi' } }] })}\n\n`;
+  const result = await streamChat(chunkRunner([withZeroError, DONE]), { model: 'm', prompt: 'hi' });
+  assert.equal(await result.text(), 'hi');
+});
+
+test('a frame carrying an explicit empty error string is content, not an in-band error', async () => {
+  // The FOURTH sentinel: an empty `error` string carries no verdict to report,
+  // so building an error from it discards a paid-for answer and hands the
+  // caller a message with nothing in it.
+  const withEmptyError =
+    `data: ${JSON.stringify({ error: '', choices: [{ delta: { content: 'hi' } }] })}\n\n`;
+  const result = await streamChat(chunkRunner([withEmptyError, DONE]), { model: 'm', prompt: 'hi' });
+  assert.equal(await result.text(), 'hi');
+});
+
+test("a REAL error carried as a non-empty STRING still stops the stream", async () => {
+  // The positive control for the two tests above: narrowing the sentinel set
+  // must not stop a genuine error being reported.
+  const withError = `data: ${JSON.stringify({ error: 'guardrail_blocked' })}\n\n`;
+  const result = await streamChat(chunkRunner([withError, DONE]), { model: 'm', prompt: 'hi' });
+  const err = await rejection(result.text());
+  assert.ok(err instanceof nRouterError, `expected a typed error, got ${inspect(err)}`);
+});
+
+test("Anthropic message_start's placeholder output_tokens is not a completion count", async () => {
+  // Anthropic's `message_start` carries `usage: {input_tokens: N,
+  // output_tokens: 1}` — the 1 is a placeholder, not a measurement. Recorded,
+  // a stream whose `message_delta` never arrives reports completionTokens: 1
+  // instead of null: a confident wrong figure where we took no reading.
+  const frames = [
+    `data: ${JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 11, output_tokens: 1 } } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
+  ];
+  const result = await streamChat(chunkRunner(frames), { model: 'm', prompt: 'hi' });
+  await result.text();
+
+  assert.deepEqual(await result.usage(), {
+    promptTokens: 11,
+    completionTokens: null,
+    totalTokens: null,
+  });
+});
+
+test("Anthropic message_delta's output_tokens IS still recorded", async () => {
+  // The positive control: ignoring the message_start placeholder must not
+  // discard the real figure the terminal frame reports.
+  const frames = [
+    `data: ${JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 11, output_tokens: 1 } } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 7 } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
+  ];
+  const result = await streamChat(chunkRunner(frames), { model: 'm', prompt: 'hi' });
+  await result.text();
+
+  assert.deepEqual(await result.usage(), { promptTokens: 11, completionTokens: 7, totalTokens: 18 });
+});
+
+test('an unindexed fragment carrying an id opens the NEXT slot even when the open one has none', async () => {
+  // The open slot's id being null does not make the next id the SAME call's:
+  // it means the wire never named the open call. Joining across that boundary
+  // concatenates two calls into one un-parseable argument string and renames
+  // the first call to the second's name.
+  const frames = [
+    `data: ${JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ function: { name: 'a', arguments: '{"x":1}' } }] } }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ id: 'call_2', function: { name: 'b', arguments: '{"y":2}' } }] } }],
+    })}\n\n`,
+    DONE,
+  ];
+  const result = await streamChat(chunkRunner(frames), { model: 'm', prompt: 'hi' });
+  await result.text();
+
+  assert.deepEqual(await result.toolCalls(), [
+    { id: null, name: 'a', arguments: '{"x":1}' },
+    { id: 'call_2', name: 'b', arguments: '{"y":2}' },
+  ]);
+});
+
+test('an unindexed input_json_delta joins the block that opened, never vanishes', async () => {
+  // `content_block_start` already falls back to a slot when the wire omits
+  // `index`; the delta branch required one, so every argument fragment of an
+  // unindexed block was dropped in silence — a tool call with a name and no
+  // arguments, which reads as a call that took none.
+  const frames = [
+    `data: ${JSON.stringify({ type: 'content_block_start', content_block: { type: 'tool_use', id: 'toolu_1', name: 'get_weather' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: '{"city":' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: '"Paris"}' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
+  ];
+  const result = await streamChat(chunkRunner(frames), { model: 'm', prompt: 'hi' });
+  await result.text();
+
+  assert.deepEqual(await result.toolCalls(), [
+    { id: 'toolu_1', name: 'get_weather', arguments: '{"city":"Paris"}' },
+  ]);
+});
+
+test('an input_json_delta for a block that never STARTED is still dropped', async () => {
+  // The positive control for the fallback above: joining onto "whatever was
+  // opened last" must not invent a slot when nothing opened at all.
+  const frames = [
+    `data: ${JSON.stringify({ type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: '{"city":"Paris"}' } })}\n\n`,
+    `data: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
+  ];
+  const result = await streamChat(chunkRunner(frames), { model: 'm', prompt: 'hi' });
+  await result.text();
+
+  assert.deepEqual(await result.toolCalls(), []);
 });

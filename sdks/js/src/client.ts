@@ -10,10 +10,18 @@
 import OpenAI from 'openai';
 
 import { chat as runChat, chatText, compare as runCompare, type ChatRunner } from './chat';
+import { runTools, type RunToolsOptions, type RunToolsResult } from './agent';
+import { NRouterMCP } from './mcp';
 import { configurationError, isAbortLike, redactKeys, transportError } from './errors';
 import { metaFromHeaders, type HeaderSource } from './meta';
-import { NRouterModels, type RawRequester } from './models';
-import { Multimodal, type Transport, type TransportRequest, type TransportResponse } from './multimodal';
+import { NRouterModels, type NRouterCapabilities, type RawRequester } from './models';
+import {
+  Multimodal,
+  type AbortSignalLike,
+  type Transport,
+  type TransportRequest,
+  type TransportResponse,
+} from './multimodal';
 import { buildFeatureBody } from './options';
 import { jsonRequest } from './json';
 import { streamChat, type StreamRunner, type StreamResult } from './stream';
@@ -67,6 +75,14 @@ export const DEFAULT_BODY_IDLE_TIMEOUT_MS = 130_000;
 /** Finite pre-header/request deadline inherited by every vendor and native path. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 600_000;
 
+/**
+ * The name carried by the body-idle backstop's error.
+ *
+ * Deliberately outside `ABORT_NAMES` (`errors.ts`): a silent upstream is a
+ * transport failure the SDK may retry, not a cancellation it must respect.
+ */
+export const BODY_IDLE_ERROR_NAME = 'NRouterBodyIdleTimeout';
+
 function withBodyIdleTimeout(response: Response, timeoutMs: number): Response {
   if (!response.body) return response;
   const reader = response.body.getReader();
@@ -74,7 +90,16 @@ function withBodyIdleTimeout(response: Response, timeoutMs: number): Response {
     async pull(controller) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const idle = new Error(`response body remained idle for ${timeoutMs}ms`);
-      idle.name = 'TimeoutError';
+      // PGSDK-113. NOT `TimeoutError`: that is the name `AbortSignal.timeout()`
+      // uses, so it is a member of `ABORT_NAMES` and `wasAborted` reads it as
+      // the CALLER having pressed cancel. An upstream that went silent for
+      // `timeoutMs` is the opposite — nobody cancelled anything, the server
+      // stopped answering — and the classification decides whether the SDK may
+      // try again: an abort is permanently non-retryable (`isRetryable`), so the
+      // single most retryable failure this transport can see was reported as
+      // the customer's own doing and never retried. The name must be one no
+      // runtime hands to an abort.
+      idle.name = BODY_IDLE_ERROR_NAME;
       try {
         const result = await Promise.race([
           reader.read(),
@@ -399,7 +424,32 @@ export function extractTraceHeaders(meta: { requestId?: string | null }): Record
 }
 
 /**
- * Returns a new headers record with trace context injected, sanitizing any newline characters.
+ * PGSDK-118 — a header value carrying CR or LF is a response/request-splitting
+ * vector, so it can never go on the wire. What it must NOT do is vanish: the
+ * SDK used to skip the header and return normally, so a developer wiring
+ * tracing got no header, no error and no warning, and then could not correlate
+ * their request with its spend row — with nothing anywhere saying why.
+ *
+ * The value is the CALLER'S OWN configuration, so refusing it is safe and
+ * actionable. Naming the option is the whole point of the change: `traceId`
+ * and `sessionId` fail identically, and a message that does not say which one
+ * leaves the developer exactly where the silent drop did.
+ */
+function assertTraceValue(option: 'traceId' | 'sessionId', value: string): string {
+  if (/[\r\n]/.test(value)) {
+    throw configurationError(
+      `${option} must not contain a carriage return or line feed: such a value cannot ` +
+        'be sent as an HTTP header, and dropping it silently would leave the request ' +
+        'untraceable with nothing to debug.',
+    );
+  }
+  return value;
+}
+
+/**
+ * Returns a new headers record with trace context injected, sanitizing any
+ * newline characters in the CALLER-SUPPLIED headers and REFUSING (never
+ * silently dropping) a `traceId`/`sessionId` that carries one.
  */
 export function withTraceContext(
   headers: Record<string, string | null | undefined> = {},
@@ -411,11 +461,11 @@ export function withTraceContext(
       out[k] = String(v);
     }
   }
-  if (context.traceId && !/[\r\n]/.test(context.traceId)) {
-    out['x-nr-trace-id'] = context.traceId;
+  if (context.traceId) {
+    out['x-nr-trace-id'] = assertTraceValue('traceId', context.traceId);
   }
-  if (context.sessionId && !/[\r\n]/.test(context.sessionId)) {
-    out['x-nr-session-id'] = context.sessionId;
+  if (context.sessionId) {
+    out['x-nr-session-id'] = assertTraceValue('sessionId', context.sessionId);
   }
   return out;
 }
@@ -663,6 +713,25 @@ export class nRouter extends OpenAI {
     if (!Number.isFinite(bodyIdleTimeoutMs) || bodyIdleTimeoutMs <= 0) {
       throw configurationError('bodyIdleTimeoutMs must be a positive finite number');
     }
+    // PGSDK-118 — fail at CONSTRUCTION, where the caller wrote the bad value,
+    // rather than per request where the header just would not appear.
+    //
+    // SNAPSHOT the validated values. The request path used to re-read
+    // `options.traceId` on every call, so the validation above held only until
+    // the caller touched its own object — and `options` is the caller's, not
+    // ours. MEASURED: mutating `options.traceId` to a CR/LF value after
+    // construction threw from inside `Headers.set`, which the vendor wraps as
+    // a RETRYABLE "Connection error.", so a permanent mistake in the caller's
+    // own input arrived dressed as a transient network fault — the exact
+    // anti-pattern the `apiKey` setter a few lines below exists to prevent.
+    //
+    // Unlike `apiKey` these two are NOT late-bound on purpose: there is no
+    // setter, no field, and no rotation story for them, so the value that was
+    // validated is the value that goes on the wire.
+    const traceId = options.traceId ? assertTraceValue('traceId', options.traceId) : undefined;
+    const sessionId = options.sessionId
+      ? assertTraceValue('sessionId', options.sessionId)
+      : undefined;
 
     // MEASURED against openai 7.8.0, with OPENAI_CUSTOM_HEADERS and
     // OPENAI_ORG_ID set in the environment: `nr.chat()` sent
@@ -743,11 +812,14 @@ export class nRouter extends OpenAI {
       headers.set('Authorization', `Bearer ${current}`);
       headers.delete('OpenAI-Organization');
       headers.delete('OpenAI-Project');
-      if (options.traceId && !headers.has('x-nr-trace-id') && !/[\r\n]/.test(options.traceId)) {
-        headers.set('x-nr-trace-id', options.traceId);
+      // The CONSTRUCTOR-VALIDATED snapshots, never `options.*`. Re-reading the
+      // caller's object here made that "known header-safe" claim false the
+      // moment the caller mutated its own variable; see the snapshot above.
+      if (traceId && !headers.has('x-nr-trace-id')) {
+        headers.set('x-nr-trace-id', traceId);
       }
-      if (options.sessionId && !headers.has('x-nr-session-id') && !/[\r\n]/.test(options.sessionId)) {
-        headers.set('x-nr-session-id', options.sessionId);
+      if (sessionId && !headers.has('x-nr-session-id')) {
+        headers.set('x-nr-session-id', sessionId);
       }
       if (!headers.has('x-nr-client-language')) {
         headers.set('x-nr-client-language', 'js');
@@ -812,14 +884,27 @@ export class nRouter extends OpenAI {
  */
 export class NRouterSurface implements ChatRunner, StreamRunner, Transport {
   readonly media: Multimodal;
+  /** The gateway's mounted `/mcp` and `/mcp/{server_id}` routes. */
+  readonly mcp: NRouterMCP;
 
   constructor(private readonly client: nRouter) {
     this.media = new Multimodal(this);
+    this.mcp = new NRouterMCP(this);
   }
 
   /** Model discovery, reachable from the same namespace as everything else. */
   get models(): NRouterModels {
     return this.client.nrouterModels;
+  }
+
+  /** Gateway capabilities and served endpoints. */
+  capabilities(): Promise<NRouterCapabilities> {
+    return this.models.capabilities();
+  }
+
+  /** List of distinct upstream providers available through this gateway. */
+  providers(): Promise<string[]> {
+    return this.models.providers();
   }
 
   /** One buffered call with full playground parity; returns body AND metadata. */
@@ -830,6 +915,15 @@ export class NRouterSurface implements ChatRunner, StreamRunner, Transport {
   /** The assistant text of a buffered reply, defensively. */
   text(res: NRouterResponse<Record<string, unknown>>): string {
     return chatText(res);
+  }
+
+  /**
+   * A BOUNDED multi-turn tool loop: the step cap, the stop condition, the
+   * tool-result append and the run-level cost accumulator, owned here rather
+   * than hand-rolled per caller. `maxSteps` defaults to `DEFAULT_MAX_STEPS`.
+   */
+  runTools(options: RunToolsOptions): Promise<RunToolsResult> {
+    return runTools(this, options);
   }
 
   /** The same options against several models at once, results in model order. */
@@ -875,6 +969,7 @@ export class NRouterSurface implements ChatRunner, StreamRunner, Transport {
   async request(
     pathOrReq: string | TransportRequest,
     body?: unknown,
+    init?: { readonly signal?: AbortSignalLike },
   ): Promise<
     { status: number; headers: HeaderSource; text: string; contentType: string } & TransportResponse
   > {
@@ -885,7 +980,17 @@ export class NRouterSurface implements ChatRunner, StreamRunner, Transport {
     // a header or a refusal ends up applied on one path and not the other.
     const req: TransportRequest =
       typeof pathOrReq === 'string'
-        ? { method: 'POST', path: pathOrReq, contentType: 'application/json', body: encodeJson(body) }
+        ? {
+            method: 'POST',
+            path: pathOrReq,
+            contentType: 'application/json',
+            body: encodeJson(body),
+            // PGSDK-106: the ChatRunner seam's cancellation token. `raw` already
+            // threads `req.signal` into the fetch options for the Transport
+            // seam, so a `chat()` call becomes cancellable by carrying it into
+            // the same field rather than by adding a second abort path.
+            signal: init?.signal,
+          }
         : pathOrReq;
 
     let res: FetchResponse;

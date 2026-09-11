@@ -469,8 +469,8 @@ def js_chat_route_present(root: Path) -> bool:
     chat_path = root / "sdks/js/src/chat.ts"
     if not client_path.exists() or not chat_path.exists():
         return False
-    client = strip_comments(client_path.read_text())
-    chat = strip_comments(chat_path.read_text())
+    client = strip_comments(client_path.read_text(encoding="utf-8", errors="replace"))
+    chat = strip_comments(chat_path.read_text(encoding="utf-8", errors="replace"))
 
     wrapper = braced_region(
         client,
@@ -500,7 +500,12 @@ def js_chat_route_present(root: Path) -> bool:
         )
         is not None
         and handoff_call is not None
-        and re.search(r"runner\.request\(path,\s*body\)", handoff_call) is not None
+        # `path` and `body` must be the first two arguments, in that order — that
+        # is the handoff this gate exists to prove. The arity is NOT pinned: the
+        # runner takes an optional third argument (per-call transport options,
+        # e.g. `{ signal }` for cancellation), and freezing `)` here made adding
+        # one look like a broken route chain rather than a new parameter.
+        and re.search(r"runner\.request\(path,\s*body\s*[,)]", handoff_call) is not None
         and re.search(
             r"typeof\s+pathOrReq\s*===\s*'string'.*?"
             r"\?\s*\{\s*method:\s*'POST',\s*path:\s*pathOrReq,",
@@ -516,7 +521,7 @@ def js_audio_upload_present(root: Path) -> bool:
     path = root / "sdks/js/src/multimodal.ts"
     if not path.exists():
         return False
-    blob = strip_comments(path.read_text())
+    blob = strip_comments(path.read_text(encoding="utf-8", errors="replace"))
     region = braced_region(blob, r"^\s{2}private\s+async\s+audioUpload\(")
     if region is None:
         return False
@@ -778,7 +783,7 @@ def route_coverage(root: Path, spec: dict) -> tuple[list[str], int, int]:
         for rel in rel_paths:
             path = root / rel
             if path.exists():
-                parts.append(path.read_text())
+                parts.append(path.read_text(encoding="utf-8", errors="replace"))
         blobs[sdk] = strip_comments("\n".join(parts))
 
     delegation_ok: dict[str, bool] = {}
@@ -786,7 +791,7 @@ def route_coverage(root: Path, spec: dict) -> tuple[list[str], int, int]:
         ok = True
         for label, rel, pattern in proofs:
             path = root / rel
-            text = path.read_text() if path.exists() else ""
+            text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
             if re.search(pattern, text) is None:
                 failures.append(f"{sdk}: explicit route delegation lost {label} in {rel}")
                 ok = False
@@ -951,7 +956,7 @@ def strip_comments(text: str) -> str:
 
 
 def load_spec() -> dict:
-    return json.loads(SPEC.read_text())
+    return json.loads(SPEC.read_text(encoding="utf-8"))
 
 
 def check_release_versions(root: Path, spec: dict) -> list[str]:
@@ -964,7 +969,7 @@ def check_release_versions(root: Path, spec: dict) -> list[str]:
         if not path.exists():
             failures.append(f"release version: missing {relative}")
             return ""
-        return path.read_text()
+        return path.read_text(encoding="utf-8", errors="replace")
 
     def match(relative: str, pattern: str) -> str | None:
         found = re.search(pattern, text(relative), flags=re.MULTILINE | re.DOTALL)
@@ -1083,7 +1088,7 @@ def check_swift_manifests(root: Path = ROOT) -> list[str]:
     def names(text: str, kind: str) -> set[str]:
         return set(re.findall(rf'\.{kind}\(\s*name:\s*"([^"]+)"', text))
 
-    a, b = shipping.read_text(), nested.read_text()
+    a, b = shipping.read_text(encoding="utf-8"), nested.read_text(encoding="utf-8")
 
     if platforms(a) != platforms(b):
         failures.append(
@@ -1095,6 +1100,114 @@ def check_swift_manifests(root: Path = ROOT) -> list[str]:
             failures.append(
                 f"swift: {kind} names differ between the two manifests — "
                 f"{sorted(names(a, kind))} vs {sorted(names(b, kind))}"
+            )
+    return failures
+
+
+# --------------------------------------------------------------------------
+# README parity — the routing section, and the retry default it must not arm
+# --------------------------------------------------------------------------
+
+ROUTING_HEADING = "## How guardrails, budgets and routing work"
+ROUTING_LINK = "nrouter.ai/docs/guides/router-settings"
+
+# A retry count set on the CLIENT applies to every method, chat completions
+# included, and a retry on a text wire is a second provider call and a second
+# BILL (§4f gate 8). `README` examples are copied verbatim into production
+# code, so an example arming N retries arms N+1 bills for one answer.
+#
+# TEN languages spell the knob three ways, and a scan that knows only one of
+# them is the silent half of a money gate: Go and the .NET-shaped SDKs write
+# `MaxRetries: 3`, Java and Rust arm it as a builder CALL — `.maxRetries(3)`,
+# `.max_retries(3)` — so the leading letter is either case and the separator is
+# `(` as often as `:` or `=`. `0` is never armed, so the digit class excludes it.
+_ARMED_RETRIES = re.compile(r"[Mm]ax_?[Rr]etries\s*[:=(]\s*([1-9]\d*)")
+
+# A PER-CALL override is the recommended shape, not the defect: it names the
+# one method it applies to, so a customer can arm retries on an idempotent GET
+# without arming them on the chat wire. Only a CLIENT-WIDE value is flagged.
+_PER_CALL_OVERRIDE = re.compile(r"with_?[Oo]ptions\s*\(")
+
+
+def _override_spans(text: str) -> list[tuple[int, int]]:
+    """Character ranges enclosed by a per-call `with_options(...)` call.
+
+    The exemption has to be POSITIONAL, not line-based. A line-based skip is
+    wrong in both directions and the recommended example is what it breaks:
+    a formatter wrapping `client.with_options(max_retries=2).models.list()`
+    across lines leaves `max_retries=2,` alone on its own line, which then reads
+    as a client-wide value and fails the gate — teaching the next author to
+    delete the SAFE example. Pointed the other way, a client constructor sharing
+    a line with a comment that merely mentions `with_options(...)` is waved
+    through, which is the silent direction.
+    """
+    spans: list[tuple[int, int]] = []
+    for match in _PER_CALL_OVERRIDE.finditer(text):
+        depth, i = 0, match.end() - 1  # the '(' the pattern ends on
+        while i < len(text):
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        else:
+            # Unbalanced: exempt that line only, never the rest of the file.
+            i = text.find("\n", match.end())
+            i = len(text) if i == -1 else i
+        spans.append((match.start(), i))
+    return spans
+
+
+def check_readme_parity(root: Path = ROOT) -> list[str]:
+    """Every shipped SDK README carries the routing section, and none arms retries.
+
+    ROUTDOC-012 — nine of the ten READMEs carried an identical "How guardrails,
+    budgets and routing work" section; the Python one, the flagship, carried no
+    routing prose at all and no `router-settings` link anywhere. A customer
+    reading the flagship README learned that Smart Router aliases exist from
+    nowhere. Ported prose drifts unless something gates it, which is what this
+    is — the nine agreed only because they were written in one pass.
+
+    ROUTDOC-007 — the same README's enterprise-proxy example passed
+    `max_retries=3` to the constructor. `DEFAULT_MAX_RETRIES = 0` is the
+    deliberate, tested default (`sdks/python/tests/test_retry_policy.py`), and
+    `_apply_transport_defaults` uses `setdefault`, so an explicit value WINS:
+    the example armed up to four provider bills for one answer on the chat wire,
+    with no warning beside it. Python cannot split retries by method the way
+    `sdks/js/src/client.ts` does, so a constructor value is the whole client.
+    A retry example belongs on a GET — `client.with_options(max_retries=2).models.list()`.
+    """
+    failures: list[str] = []
+    readmes = sorted(root.glob("sdks/*/README.md"))
+    # Never pass by finding nothing, and never pass by finding SOME. The claim
+    # is parity across the shipped SDKs, so the floor is one README per SDK in
+    # `SDK_SOURCES`; a "more than one" floor lets eight be deleted unnoticed,
+    # which is the "gate prints green while checking nothing" shape wearing a
+    # count.
+    missing = sorted(set(SDK_SOURCES) - {p.parent.name for p in readmes})
+    if len(readmes) < len(SDK_SOURCES):
+        return [
+            f"readme parity: found {len(readmes)} SDK READMEs under sdks/*/README.md, "
+            f"expected one per shipped SDK ({len(SDK_SOURCES)}) — missing {missing}"
+        ]
+
+    for path in readmes:
+        sdk = path.parent.name
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if ROUTING_HEADING not in text:
+            failures.append(f"{sdk}: README is missing the {ROUTING_HEADING!r} section")
+        if ROUTING_LINK not in text:
+            failures.append(f"{sdk}: README links nowhere to {ROUTING_LINK}")
+        exempt = _override_spans(text)
+        for armed in _ARMED_RETRIES.finditer(text):
+            if any(start <= armed.start() < end for start, end in exempt):
+                continue
+            failures.append(
+                f"{sdk}: README example arms {armed.group(1)} client-wide retries "
+                f"({armed.group(0)!r}) — on a text wire a retry is a second "
+                f"provider bill; use 0, or put the example on a GET"
             )
     return failures
 
@@ -1117,7 +1230,7 @@ def check(root: Path = ROOT, spec: dict | None = None) -> list[str]:
             if not path.exists():
                 failures.append(f"{sdk}: missing source file {rel}")
                 continue
-            blob_parts.append(path.read_text())
+            blob_parts.append(path.read_text(encoding="utf-8", errors="replace"))
         if not blob_parts:
             continue
         raw = "\n".join(blob_parts)
@@ -1204,7 +1317,7 @@ def check(root: Path = ROOT, spec: dict | None = None) -> list[str]:
         # The code-to-status binding IS proven, per SDK, by each suite's
         # `each gateway code maps to its type` and its codeless-status tests,
         # every one of them mutation-checked. That is where the guarantee lives;
-        # this gate covers what those cannot — that all nine agree.
+        # this gate covers what those cannot — that every SDK agrees.
         for status in sorted({str(e["http"]) for e in spec["errors"].values()}):
             if status not in blob:
                 failures.append(
@@ -1227,7 +1340,34 @@ def check(root: Path = ROOT, spec: dict | None = None) -> list[str]:
     # count gate and leaving the fourteen-item lists in place, which is a
     # STRONGER false claim than the count it replaced.
     failures.extend(check_doc_header_enumeration(root))
+    # ROUTDOC-012 / ROUTDOC-007 — the ten READMEs are one contract surface: the
+    # routing section, and no example arming client-wide retries.
+    failures.extend(check_readme_parity(root))
     return failures
+
+
+def _mutate(text: str, old: str, new: str, problems: list[str], label: str) -> str:
+    """Apply one planted mutation, refusing to apply a mutation that does nothing.
+
+    Every self-test case here is `text.replace(old, new, 1)`, which returns the
+    string UNCHANGED when `old` is absent.  When the source is later reformatted
+    the literal stops matching, the victim file is rewritten identically, the
+    check correctly reports no failure, and the case then blames the GATE:
+    "miswiring ... did not fail the check".  That is how a stale mutation
+    masquerades as a broken gate — and, worse, how it would read as a passing
+    mutation test if the assertion were ever inverted.
+
+    Distinguishing the two costs one comparison, so make it impossible to skip:
+    a mutation that changes nothing is reported as a stale mutation, naming the
+    literal to re-anchor.
+    """
+    mutated = text.replace(old, new, 1)
+    if mutated == text:
+        problems.append(
+            f"STALE MUTATION ({label}): the planted text is absent, so this case "
+            f"proved nothing. Re-anchor it on the current source. Looked for: {old!r}"
+        )
+    return mutated
 
 
 def self_test() -> int:
@@ -1241,6 +1381,22 @@ def self_test() -> int:
     """
     import shutil
     import tempfile
+
+    # The fixtures intentionally mutate files containing Unicode. pathlib uses
+    # the Windows ANSI code page when encoding is omitted, which can corrupt a
+    # fixture before the gate gets a chance to inspect it.
+    original_write_text = Path.write_text
+
+    def write_fixture_text(path: Path, data: str, encoding=None, errors=None, newline=None):
+        return original_write_text(
+            path,
+            data,
+            encoding=encoding or "utf-8",
+            errors=errors or "strict",
+            newline=newline,
+        )
+
+    Path.write_text = write_fixture_text
 
     spec = load_spec()
     problems = []
@@ -1303,6 +1459,14 @@ def self_test() -> int:
         fake_root = Path(tmp)
         copied_paths = {r for paths in SDK_SOURCES.values() for r in paths}
         copied_paths.update(RELEASE_METADATA_PATHS)
+        # `check_readme_parity` reads the ten SDK READMEs. Leaving them out of
+        # the fixture makes the "an unmodified copy passes" control fail on an
+        # EMPTY tree rather than on anything this self-test is testing — and the
+        # only other way to make that green would be to let the parity check
+        # pass when it finds no READMEs, which is the gate-checks-nothing shape.
+        copied_paths.update(
+            str(p.relative_to(ROOT)) for p in ROOT.glob("sdks/*/README.md")
+        )
         for rel in copied_paths:
             src = ROOT / rel
             if not src.exists():
@@ -1322,10 +1486,88 @@ def self_test() -> int:
         if check(root=fake_root):
             problems.append("an unmodified copy of the tree did not pass")
 
+        # --- check_readme_parity: prove every arm of it bites -----------------
+        # ROUTDOC-007/012 is only worth its docstring if each arm goes red, and
+        # the retry arm has to bite in TEN languages rather than one. Go writes
+        # `MaxRetries: 3`, Java `.maxRetries(3)`: a scan anchored on a lowercase
+        # `max` and a `:`/`=` separator reads both as clean while the example
+        # arms N+1 provider bills for one answer (§4f gate 8). The negative case
+        # matters as much — flagging the RECOMMENDED per-call shape because a
+        # formatter wrapped it teaches the next author to delete the safe
+        # example.
+        victim = fake_root / "sdks/go/README.md"
+        readme = victim.read_text(encoding="utf-8")
+
+        for label, planted, must_flag in (
+            (
+                "a python-style client-wide value",
+                "```python\nclient = nRouter(max_retries=3)\n```",
+                True,
+            ),
+            (
+                "a Go PascalCase field",
+                "```go\nclient := nrouter.New(nrouter.Options{MaxRetries: 3})\n```",
+                True,
+            ),
+            (
+                "a Java builder call",
+                "```java\nNRouter.builder().maxRetries(3).build();\n```",
+                True,
+            ),
+            (
+                "a per-call override split over lines",
+                "```python\nclient.with_options(\n    max_retries=2,\n).models.list()\n```",
+                False,
+            ),
+        ):
+            victim.write_text(
+                _mutate(
+                    readme,
+                    ROUTING_HEADING,
+                    f"{planted}\n\n{ROUTING_HEADING}",
+                    problems,
+                    f"readme retry case: {label}",
+                ),
+                encoding="utf-8",
+            )
+            armed = [f for f in check(root=fake_root) if "go: README example arms" in f]
+            if must_flag and not armed:
+                problems.append(
+                    f"a README arming retries as {label} did not fail the check"
+                )
+            if not must_flag and armed:
+                problems.append(
+                    f"{label} was wrongly flagged as a client-wide retry: {armed}"
+                )
+
+        # Both prose arms too: the section, and the link it must carry.
+        victim.write_text(
+            _mutate(readme, ROUTING_HEADING, "## Removed", problems, "readme heading"),
+            encoding="utf-8",
+        )
+        if not any("go: README is missing" in f for f in check(root=fake_root)):
+            problems.append("deleting a README's routing section did not fail the check")
+
+        victim.write_text(
+            _mutate(
+                readme, ROUTING_LINK, "docs/guides/removed", problems, "readme link"
+            ),
+            encoding="utf-8",
+        )
+        if not any("go: README links nowhere" in f for f in check(root=fake_root)):
+            problems.append("deleting a README's router-settings link did not fail the check")
+
+        # A DELETED SDK README must not pass by leaving nine behind. The floor
+        # is one README per shipped SDK, not "more than one".
+        victim.unlink()
+        if not any("readme parity: found" in f for f in check(root=fake_root)):
+            problems.append("deleting an entire SDK README did not fail the check")
+        victim.write_text(readme, encoding="utf-8")
+
         # A package-version drift must stop every publish workflow that invokes
         # this gate, before any registry credential becomes reachable.
         victim = fake_root / "sdks/js/package.json"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(
             text.replace(f'"version": "{spec["version"]}"', '"version": "0.0.0"', 1)
         )
@@ -1336,7 +1578,7 @@ def self_test() -> int:
 
         # Delete a header this SDK really reads.
         victim = fake_root / "sdks/rust/src/meta.rs"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(text.replace('"x-nr-response-cache-age",\n', "", 1))
         failures = check(root=fake_root)
         if not any("x-nr-response-cache-age" in f and "rust" in f for f in failures):
@@ -1348,7 +1590,7 @@ def self_test() -> int:
         # Delete one native streaming helper. Streaming is a public capability,
         # so a buffered-only regression must not pass the shared gate.
         victim = fake_root / "sdks/go/stream.go"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(text.replace("MessagesStream(", "RemovedMessagesStream(", 1))
         failures = check(root=fake_root)
         if not any("messagesStream" in f and "go" in f for f in failures):
@@ -1358,7 +1600,7 @@ def self_test() -> int:
         # Java's native metadata surface is additive to openai-java. Losing a
         # named native helper must not hide behind the vendor factory.
         victim = fake_root / "sdks/java/src/main/java/ai/nrouter/sdk/NRouterHttpClient.java"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(
             text.replace(
                 "public NRouterHttpResponse embeddings(",
@@ -1387,7 +1629,7 @@ def self_test() -> int:
         # A path-only gate would miss this because the generic transport can
         # still send arbitrary paths; completeness requires the public helper.
         victim = fake_root / "sdks/go/client.go"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(
             text.replace(
                 "func (c *Client) ImagesGenerations",
@@ -1405,7 +1647,7 @@ def self_test() -> int:
         # JS owns its multimodal transport. Losing one of those helpers must
         # fail even though the inherited OpenAI client still has other routes.
         victim = fake_root / "sdks/js/src/multimodal.ts"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(text.replace("async speech(", "async removedSpeech(", 1))
         failures = check(root=fake_root)
         if not any("/v1/audio/speech" in f and "js" in f for f in failures):
@@ -1428,7 +1670,7 @@ def self_test() -> int:
         # SDK's native lane,
         # not one generic "extends OpenAI" waiver for the whole SDK.
         victim = fake_root / "sdks/js/src/client.ts"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(
             text.replace(
                 'OpenAI["completions"]["create"]',
@@ -1445,10 +1687,12 @@ def self_test() -> int:
         # concrete POST construction must invalidate the route even while the
         # correct path constant and runChat wrapper remain.
         victim.write_text(
-            text.replace(
-                "? { method: 'POST', path: pathOrReq,",
-                "? { method: 'GET', path: pathOrReq,",
-                1,
+            _mutate(
+                text,
+                "method: 'POST',\n            path: pathOrReq,",
+                "method: 'GET',\n            path: pathOrReq,",
+                problems,
+                "JS chat transport method",
             )
         )
         failures = check(root=fake_root)
@@ -1457,7 +1701,7 @@ def self_test() -> int:
         victim.write_text(text)
 
         victim = fake_root / "sdks/js/src/chat.ts"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(
             text.replace(
                 "messagesWire ? MESSAGES_PATH : CHAT_PATH,",
@@ -1473,7 +1717,7 @@ def self_test() -> int:
         # Python's video helpers are native additions to the inherited OpenAI
         # client. A deleted helper must not hide behind that inheritance seam.
         victim = fake_root / "sdks/python/nroutersdk/client.py"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(
             text.replace("def download_content(", "def removed_download_content(", 1)
         )
@@ -1524,7 +1768,7 @@ def self_test() -> int:
         # a streaming helper or generic transport elsewhere must not satisfy
         # the buffered route cell.
         victim = fake_root / "sdks/go/client.go"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(
             text.replace(
                 'return c.Post(ctx, "/chat/completions", body)',
@@ -1614,7 +1858,7 @@ def self_test() -> int:
         victim.write_text(text)
 
         victim = fake_root / "sdks/r/R/client.R"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(
             text.replace(
                 'retrieve_video = paste0("/videos/", segment(id))',
@@ -1628,7 +1872,7 @@ def self_test() -> int:
         victim.write_text(text)
 
         victim = fake_root / "sdks/js/src/multimodal.ts"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(
             text.replace(
                 "`/videos/${encodePathSegment(id, 'video id')}`",
@@ -1645,7 +1889,7 @@ def self_test() -> int:
         # delegation seam must invalidate all route-cell evidence, not merely
         # the base-URL check.
         victim = fake_root / "sdks/android/src/main/kotlin/ai/nrouter/sdk/android/NRouterAndroid.kt"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(text.replace("ai.nrouter.sdk.NRouter", "removed.sdk.NRouter"))
         failures = check(root=fake_root)
         if not any("/v1/chat/completions" in f and "android" in f for f in failures):
@@ -1656,7 +1900,7 @@ def self_test() -> int:
         # so one owner route drifting must invalidate the matching Android cell
         # rather than leaving all 15 green behind one shared class symbol.
         victim = fake_root / "sdks/kotlin/src/main/kotlin/ai/nrouter/sdk/NRouter.kt"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(
             text.replace(
                 'post("/images/generations", body)',
@@ -1671,10 +1915,10 @@ def self_test() -> int:
 
         # Delete an error code this SDK really maps.
         victim = fake_root / "sdks/dart/lib/src/errors.dart"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(text.replace("'guardrail_blocked'", "'REMOVED'"))
         stream_victim = fake_root / "sdks/dart/lib/src/client.dart"
-        stream_text = stream_victim.read_text()
+        stream_text = stream_victim.read_text(encoding="utf-8")
         stream_victim.write_text(
             stream_text.replace("'guardrail_blocked'", "'REMOVED'")
         )
@@ -1688,7 +1932,7 @@ def self_test() -> int:
 
         # Plant a retired spelling.
         victim = fake_root / "sdks/swift/Sources/NRouter/NRouter.swift"
-        text = victim.read_text()
+        text = victim.read_text(encoding="utf-8")
         victim.write_text(text + f"\n// {RETIRED[0]}\n")
         if not any("retired spelling" in f for f in check(root=fake_root)):
             problems.append("a retired spelling in a real SDK did not fail the check")
@@ -1698,7 +1942,7 @@ def self_test() -> int:
         # ships, so a floor changed in the nested one alone is invisible.
         victim = fake_root / "sdks/swift/Package.swift"
         if victim.exists():
-            text = victim.read_text()
+            text = victim.read_text(encoding="utf-8")
             victim.write_text(text.replace(".macOS(.v12)", ".macOS(.v13)"))
             if not any("platform floors differ" in f for f in check(root=fake_root)):
                 problems.append(
@@ -1710,7 +1954,7 @@ def self_test() -> int:
         # the package at all.
         shipping = fake_root / "Package.swift"
         if shipping.exists():
-            text = shipping.read_text()
+            text = shipping.read_text(encoding="utf-8")
             shipping.unlink()
             if not any(
                 "reads the manifest from the repository root" in f
@@ -1745,6 +1989,11 @@ def self_test() -> int:
 def main() -> int:
     if "--self-test" in sys.argv:
         return self_test()
+
+    if "--feature-report" in sys.argv:
+        from check_features import main as feature_report
+
+        return feature_report()
 
     failures = check()
     checked = len(SDK_SOURCES)

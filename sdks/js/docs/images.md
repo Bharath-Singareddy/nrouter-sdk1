@@ -6,6 +6,14 @@ One call, on `client.nr.media`:
 |---|---|---|
 | `image(params)` | `POST /v1/images/generations` | `NRouterResponse<JsonObject>` — always JSON |
 
+**Image generation is served by OpenAI only.** This is a provider allowlist in
+the gateway, not a catalogue accident: no other provider declares an upstream
+image path at a path this gateway mounts, so an image call routed to Anthropic,
+AWS Bedrock, Vertex AI, Azure AI Foundry or Alibaba DashScope is refused, and a
+fallback chain entry on any of them is skipped rather than tried — there is no
+cross-provider failover on this route. The same holds for audio, video and
+embeddings. Full table: [`routing.md`](./routing.md).
+
 There is no image-bytes route. `response_format: 'url'` puts links in the JSON
 body and `response_format: 'b64_json'` puts base64 in it, so `image()` returns a
 parsed body either way and never a `BinaryResult`. That is the difference from
@@ -134,7 +142,7 @@ and it is never a reassurance.
 
 ## A runnable one
 
-[`examples/typescript/image-agent/`](../../../examples/typescript/image-agent/)
+[`demo/image-agent/`](../demo/image-agent/)
 loops the call over N prompts and prices, counts, logs and joins every one of
 them. It writes a JSONL record on the failure path as well as the success path,
 excludes unpriced calls from its total and says `TOTAL INCOMPLETE` when it does,

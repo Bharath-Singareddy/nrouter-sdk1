@@ -8,6 +8,15 @@ Three calls, on `client.nr.media`:
 | `transcribe(params)` | `POST /v1/audio/transcriptions` | `TranscriptionResult` — text, in the caller's language |
 | `translate(params)` | `POST /v1/audio/translations` | `TranscriptionResult` — text, always in English |
 
+**All three audio routes are served by OpenAI only.** This is a provider
+allowlist in the gateway, not a catalogue accident: no other provider declares an
+upstream path for speech, transcription or translation at a path this gateway
+mounts, so an audio call routed to Anthropic, AWS Bedrock, Vertex AI, Azure AI
+Foundry or Alibaba DashScope is refused, and a fallback chain entry on any of
+them is skipped rather than tried. The same holds for images, video and
+embeddings; `count_tokens` is the mirror image, served by Anthropic alone. Full
+table: [`routing.md`](./routing.md).
+
 Fewer models serve audio than serve chat, and the set is the live catalogue's
 rather than this page's. Fetch it — `await client.models.list()`, or
 `curl https://nrouter.ai/api/public/models` — and pick an id that declares the
@@ -188,7 +197,11 @@ one of them can be the unpriced one. Track cost per leg, not per turn.
 
 A runnable version, with a per-call cost table and a session total that reports
 `TOTAL INCOMPLETE` the moment any leg comes back unpriced, is at
-[`examples/typescript/voice-agent/`](../../../examples/typescript/voice-agent/).
+[`demo/voice-agent/`](../demo/voice-agent/).
+
+For interactive testing and building conversational voice agents:
+- **Interactive Terminal Agent**: [`demo/interactive-agent.mjs`](../demo/interactive-agent.mjs) runs a conversational REPL in your terminal with streaming text, turn latency/cost tracking, and optional speech synthesis playback (`node demo/interactive-agent.mjs --live --voice`).
+- **Interactive Web UI**: [`demo/ui/server.js`](../demo/ui/server.js) serves a browser interface on `http://127.0.0.1:4317` with browser microphone input (`SpeechRecognition`), real-time SSE streaming, voice turn generation, and instant audio replay.
 
 Two things worth copying from it. Latency is the sum of the legs, and each leg
 reports its own on `meta.latencyMs` — milliseconds from the gateway's edge until

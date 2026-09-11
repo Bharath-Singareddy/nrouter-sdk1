@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/%40nrouter_ai%2Fsdk?logo=npm&label=npm)](https://www.npmjs.com/package/@nrouter_ai/sdk)
 [![Socket](https://badge.socket.dev/npm/package/@nrouter_ai/sdk/latest)](https://socket.dev/npm/package/@nrouter_ai/sdk)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/nRouterAI/nrouter-sdk/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/nRouterGateway/nrouter-sdk/blob/main/LICENSE)
 
 SDK for the [nRouter](https://nrouter.ai) LLM gateway: one API key for models
 across six provider clouds. It wraps the official `openai` package with the
@@ -178,7 +178,7 @@ per character of `input`.
 
 There is no streaming TTS and no realtime session: a voice turn is a cascade of
 three separately billed calls, `transcribe()` → `nr.chat()` → `speech()`. The
-runnable version is [`examples/typescript/voice-agent/`](../../examples/typescript/voice-agent/),
+runnable version is [`demo/voice-agent/`](demo/voice-agent/),
 and the full semantics — the upload rules, what is and is not guardrail-scanned,
 and why a missing cost must never be summed as zero — are in
 [docs/audio.md](./docs/audio.md).
@@ -207,7 +207,7 @@ Which quantity you are billed on depends on the model — `gpt-image-*` prices f
 the `usage` block in the body, everything else prices per image from `n` × size ×
 quality — and **no response header carries the count, size or quality**. Reconcile
 against the spend row by request id rather than recomputing. The runnable version
-is [`examples/typescript/image-agent/`](../../examples/typescript/image-agent/)
+is [`demo/image-agent/`](demo/image-agent/)
 and the semantics are in [docs/images.md](./docs/images.md).
 
 ## Video
@@ -235,7 +235,7 @@ reports `costStatus: null`, which is **not** the same as the `unpriced` a billed
 call reports when it could not be priced; conflating them turns a long render into
 a pricing bug that does not exist. A retry of the create is a second *render*, not
 merely a second bill. The runnable version is
-[`examples/typescript/video-agent/`](../../examples/typescript/video-agent/) and
+[`demo/video-agent/`](demo/video-agent/) and
 the semantics — the sealed job handle, why an accepted-then-failed job stays
 billed, and the download bound — are in [docs/video.md](./docs/video.md).
 
@@ -268,29 +268,29 @@ tests execute because they cannot strip TypeScript syntax from `.ts` test files.
 
 ## Examples And Live Diagnostics
 
-The repo includes JavaScript examples for manual SDK checks:
+The repo includes JavaScript examples and interactive tools for manual SDK checks:
 
 ```bash
 npm run build
-node examples/javascript/sdk-demo/agent.js --live
-node examples/javascript/sdk-demo/feature-spend-test.js
-node examples/javascript/sdk-demo/ui/server.js
+node demo/agent.js --live
+node demo/interactive-agent.mjs --live --voice
+node demo/ui/server.js
 ```
 
-`examples/javascript/sdk-demo/ui/server.js` starts a browser UI at `http://127.0.0.1:4317`. The browser
-does not receive the API key; the local Node server reads `NROUTER_API_KEY` and
-calls the built SDK package.
+`demo/interactive-agent.mjs` provides an interactive terminal REPL with multi-turn chat, streaming tokens, model switching, per-turn latency/cost tracking, and optional speech synthesis playback (`--voice`).
 
-See [`examples/javascript/sdk-demo/README.md`](../../examples/javascript/sdk-demo/README.md) for commands and
+`demo/ui/server.js` starts a conversational browser UI at `http://127.0.0.1:4317` with real-time SSE streaming, speech recognition via browser microphone, audio replay for voice synthesis, and one-click test suite execution. The browser does not receive the API key; the local Node server reads `NROUTER_API_KEY` and calls the built SDK package.
+
+See [`demo/README.md`](demo/README.md) for commands and
 [`docs/live-sdk-agent-report.md`](./docs/live-sdk-agent-report.md) for the latest
 manual test findings.
 
 ## Requirements
 
-**Node 22 or newer**, declared in `engines`. That is the RUNTIME floor for
-anyone installing this package, not just for running its tests: `openai` 7 sets
-it and this package inherits it. Before 2.0.0 nothing declared a floor at all,
-so an unsupported runtime failed somewhere further in with a worse message.
+**Node 22.18 or newer**, declared in `engines`. That is the floor for this
+package because the test runner executes TypeScript tests directly through
+Node's native type stripping. Before 2.0.0 nothing declared a floor at all, so
+an unsupported runtime failed somewhere further in with a worse message.
 
 The dependency tree is deliberately **one package**. `openai` 7 has no
 dependencies of its own, where `openai` 4 pulled in 36 transitive packages —
@@ -327,3 +327,24 @@ enabled:
   are not cross-provider Smart Router wires.
 - [Node.js / TypeScript quickstart](https://nrouter.ai/docs/sdks/nodejs) and the
   [API reference](https://nrouter.ai/docs/api-reference).
+
+## Demos & Examples
+
+Runnable demonstrations live in [`demo/`](demo/):
+- [Quickstart TS](demo/quickstart.ts) / [Quickstart JS](demo/quickstart.js) — basic client and chat completion.
+- [Voice Agent](demo/voice-agent/) — speech, transcription, and multimodal agent.
+- [Chat Agent](demo/chat-agent/) — conversation memory, tools, and streaming.
+- [Image Agent](demo/image-agent/) — image generation and cost tracking.
+- [Video Agent](demo/video-agent/) — video generation lifecycle.
+- [Demo Documentation](demo/README.md) — execution runbooks.
+
+## Validation Playbook
+
+This SDK maintains a repeatable 18-step verification process:
+- [Validation Playbook](docs/validation-playbook.md) — comprehensive end-to-end verification runbook.
+
+## Open-Source Standards & License
+
+- **License:** [MIT License](../../LICENSE)
+- **Repository:** [nRouterGateway/nrouter-sdk](https://github.com/nRouterGateway/nrouter-sdk)
+- **Issue Tracker:** [GitHub Issues](https://github.com/nRouterGateway/nrouter-sdk/issues)
