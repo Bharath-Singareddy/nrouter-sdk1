@@ -1,13 +1,13 @@
 ---
 name: nrouter-sdk
-description: Use when changing or adding any SDK wire, endpoint, header, error code, demo, example, validation playbook, README or version and running the conformance gate, when changing error classification, streaming abort/cancellation, secret redaction, retry policy or timeouts, or when adding, running or auditing tests in any of the ten nRouter SDKs (runner commands, offline default, NROUTER_LIVE probe, fake transports).
+description: Use when changing or adding any SDK wire, endpoint, header, error code, demo, example, validation playbook, README or version and running the conformance gate, when changing error classification, streaming abort/cancellation, secret redaction, retry policy or timeouts, when developing or testing the public @nrouter_ai/support-agent library, or when adding, running or auditing tests in any of the ten nRouter SDKs (runner commands, offline default, NROUTER_LIVE probe, fake transports).
 metadata:
-  version: 1.0.0
+  version: 1.1.0
 ---
 
 # nRouter SDKs (router)
 
-Ten SDKs, one gateway contract. This router holds the facts every SDK change shares; open the
+Ten SDKs, one gateway contract, plus the public zero-DB customer support agent (`@nrouter_ai/support-agent`). This router holds the facts every SDK change shares; open the
 sub-skill for the kind of change you are making.
 
 ## Sub-skills
@@ -17,6 +17,7 @@ sub-skill for the kind of change you are making.
 | sub-skill `parity` | Any wire, endpoint, header, error code, demo, example, validation playbook, README or version change — the cross-SDK propagation protocol, the synchronization matrix, the README standard, the coordinated version. |
 | sub-skill `hardening` | Error classification (and the undocumented 502/504 arms), streaming and abort/cancellation, secret redaction, client retry policy, timeouts. |
 | sub-skill `testing` | Adding, changing, running or auditing tests — per-language runner commands, the offline-by-default suite, the `NROUTER_LIVE` billed probe, in-process fakes per ecosystem, what a change must be covered by, what each registry publishes. |
+| sub-skill `support-agent` | Developing, configuring, or testing the public `@nrouter_ai/support-agent` package (`agents/customer-support-agent/`), building knowledge base indices with `support-agent build-kb`, or verifying in-process zero-DB retrieval and SSE streaming. |
 
 Most changes touch more than one: a new wire is `parity` (all ten SDKs) plus `testing` (a contract
 test per SDK); a classification change is `hardening` plus `testing` (a behavioural test per status).
@@ -83,3 +84,12 @@ a second bill, with nothing to deduplicate against.
 ⚠️ **The two SDKs wrapping a vendor client had to OVERRIDE a non-zero vendor default.** If you swap,
 upgrade, or reconfigure a vendor client, re-assert the pin and prove it with a test — this is the
 one place the default silently comes back.
+
+### The customer support agent (`@nrouter_ai/support-agent`)
+
+Located at `agents/customer-support-agent/`. It is a zero-database streaming agent package built
+exclusively on `@nrouter_ai/sdk`. It implements in-process cosine similarity search over static JSON
+indices built via `support-agent build-kb`, supports PII masking and citation formatting, and streams
+SSE frames. Tested with `pnpm --dir agents/customer-support-agent test` (offline-by-default).
+Detail in sub-skill `support-agent`.
+
