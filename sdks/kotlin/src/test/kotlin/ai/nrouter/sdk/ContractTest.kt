@@ -719,6 +719,71 @@ class ContractTest {
     }
 
     @Test
+    fun `a transport failure keeps the underlying exception and names its class`() = runBlocking {
+        // A failed live run that says only "Transport: Connection refused" can't
+        // be told apart from DNS, TLS, or a proxy failure. The cause and its
+        // class have to survive the wrap.
+        val dead = MockWebServer().also { it.start() }
+        val url = dead.url("/v1").toString()
+        dead.shutdown()
+        val error = assertFailsWith<NRouterError.Transport> {
+            NRouter(apiKey = "sk-nrouter-test", baseURL = url).chatCompletions(JSONObject())
+        }
+        val cause = assertNotNull(error.cause, "the underlying exception was dropped")
+        assertTrue(cause is java.io.IOException, "unexpected cause type ${cause.javaClass.name}")
+        assertTrue(
+            error.message.orEmpty().contains(cause.javaClass.name),
+            "the message does not name ${cause.javaClass.name}: ${error.message}",
+        )
+    }
+
+    @Test
+    fun `a streaming transport failure keeps the underlying exception`() = runBlocking {
+        val dead = MockWebServer().also { it.start() }
+        val url = dead.url("/v1").toString()
+        dead.shutdown()
+        val error = assertFailsWith<NRouterError.Transport> {
+            NRouter(apiKey = "sk-nrouter-test", baseURL = url).chatCompletionsStream(JSONObject()).toList()
+        }
+        val cause = assertNotNull(error.cause, "the underlying exception was dropped")
+        assertTrue(error.message.orEmpty().contains(cause.javaClass.name), "message: ${error.message}")
+    }
+
+    @Test
+    fun `a stream cut mid-body is a typed transport error, not a raw IOException`() = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("content-type", "text/event-stream")
+                .setBody("data: {\"choices\":[]}\n\n".repeat(64))
+                .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY),
+        )
+        val error = runCatching { clientFor(server).chatCompletionsStream(JSONObject()).toList() }
+            .exceptionOrNull()
+        assertTrue(error is NRouterError.Transport, "expected Transport, got ${error?.javaClass?.name}: ${error?.message}")
+    }
+
+    @Test
+    fun `a transport message names the root cause and stays redacted`() {
+        val root = javax.net.ssl.SSLHandshakeException("PKIX path building failed")
+        val error = NRouterError.Transport(
+            "call to sk-nrouter-abcdefghijklmnop failed",
+            java.io.IOException("unexpected end of stream", root),
+        )
+        val message = error.message.orEmpty()
+        assertTrue(message.contains("java.io.IOException"), message)
+        assertTrue(message.contains("javax.net.ssl.SSLHandshakeException"), message)
+        assertTrue(message.contains("PKIX path building failed"), message)
+        assertFalse(message.contains("abcdefghijklmnop"), "a key survived redaction: $message")
+        assertSame(root, error.cause?.cause)
+    }
+
+    @Test
+    fun `a transport error with no cause keeps its plain message`() {
+        assertEquals("Timeout waiting for video job v1", NRouterError.Transport("Timeout waiting for video job v1").message)
+    }
+
+    @Test
     fun `the buffered ceiling cuts a call whose body never finishes`() = runBlocking {
         // The read timeout catches silence between bytes; this catches a peer
         // that keeps dribbling forever, which is the other way to hang.

@@ -13,7 +13,8 @@ public sealed class NRouterError(
     message: String,
     /** The gateway payload, or `null` when the request never reached it. */
     public val body: NRouterErrorBody? = null,
-) : Exception(message) {
+    cause: Throwable? = null,
+) : Exception(message, cause) {
 
     /** `invalid_request` (400) — invalid JSON or request shape. */
     public class Request(body: NRouterErrorBody) : NRouterError(body.describe(), body)
@@ -53,8 +54,14 @@ public sealed class NRouterError(
     /**
      * The request left this process and got no answer — DNS, TLS, a dropped
      * connection, a timeout. Retryable.
+     *
+     * [cause] is the exception that ended the call, kept so an intermittent
+     * failure can be diagnosed: the message names its class and, when it wraps
+     * another, the root cause (`UnknownHostException`, `SSLHandshakeException`,
+     * `SocketTimeoutException`, ...). The message is redacted like every other.
      */
-    public class Transport(message: String) : NRouterError(redactKeys(message))
+    public class Transport(message: String, cause: Throwable? = null) :
+        NRouterError(redactKeys(transportMessage(message, cause)), cause = cause)
 
     public class Configuration(message: String) : NRouterError(redactKeys(message))
 
@@ -219,6 +226,27 @@ public fun redactKeys(input: String): String {
         if (m.value.startsWith("sk-nrouter")) m.value else "sk-***"
     }
 }
+
+/**
+ * The message of a [NRouterError.Transport]: [message], then the class of the
+ * exception that ended the call and, when that one wraps another, the root
+ * cause's class and message. Bounded, so a cyclic cause chain cannot loop.
+ */
+internal fun transportMessage(message: String, cause: Throwable?): String {
+    if (cause == null) return message
+    val root = generateSequence(cause) { it.cause?.takeIf { next -> next !== it } }
+        .take(MAX_CAUSE_DEPTH)
+        .last()
+    val detail = if (root === cause) {
+        cause.javaClass.name
+    } else {
+        val rootMessage = root.message?.let { ": $it" }.orEmpty()
+        "${cause.javaClass.name}, caused by ${root.javaClass.name}$rootMessage"
+    }
+    return "$message ($detail)"
+}
+
+private const val MAX_CAUSE_DEPTH = 16
 
 /** Structured gateway error envelope. */
 public data class NRouterErrorEnvelope(
