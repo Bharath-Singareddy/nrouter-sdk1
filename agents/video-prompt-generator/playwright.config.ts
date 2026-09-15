@@ -14,7 +14,7 @@ export default defineConfig({
   workers: 1,
   timeout: 90_000,
   retries: 0,
-  globalSetup: './e2e/global-setup.ts',
+  
   use: {
     baseURL: 'http://127.0.0.1:4174',
   },
