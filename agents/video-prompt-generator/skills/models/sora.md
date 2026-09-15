@@ -1,0 +1,2 @@
+## OpenAI Sora Specifics
+Sora excels at extreme photorealism, fluid physics, and continuous long takes. Focus the prompt on fluid dynamics (e.g., "glowing data behaving like fluid"), macroscopic details, and complex unbroken tracking shots.

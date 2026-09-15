@@ -1,0 +1,2 @@
+## Runway Gen-3 Specifics
+Gen-3 excels at temporal consistency and precise hyper-realistic textural details. Focus the prompt on texture (e.g., "brushed aluminum", "matte black plastic") and fast-paced speed-ramped camera movements (e.g., "whip-pan into a speed-ramped push-in").

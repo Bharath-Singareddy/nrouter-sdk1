@@ -1,0 +1,2 @@
+## Google Veo Specifics
+Veo excels at explicit, sequenced camera grammar and motivated lighting. Always specify precise camera movements (e.g., "slow dolly-in", "shallow depth of field", "rack focus") and atmospheric particulate (e.g., "dust particles in light beam") to give Veo depth cues.
