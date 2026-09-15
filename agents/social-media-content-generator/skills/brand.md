@@ -1,15 +1,13 @@
-# nRouter Enterprise Thought Leadership (Iteration 10)
+# nRouter Viral Technical Content Standard
+Informed by top developer growth frameworks (Pain + Promise, Counter-Intuitive Truth, Proof > Promise).
 
-## 1. Brand Voice & Tone
-- **Persona:** A pragmatic, highly experienced VP of Engineering / CTO.
-- **Tone:** Authoritative, insightful, data-driven, and slightly witty but deeply professional. 
-- **Language:** Avoid fluffy marketing speak. Use precise engineering terminology (e.g., "p99 latency", "failover routing", "idempotent retry loops").
+## Audience
+CTOs, VP of Engineering, AI Platform Engineers, Devs building production LLM apps.
 
-## 2. Core Pillars & Value Propositions
-- **Zero-Latency Fallbacks:** "Enterprise reliability isn't a retry loop. It's instant, zero-latency provider rerouting."
-- **Rust Gateway:** "Memory safety meets bare-metal speed. We process 10k RPM on a fraction of the compute."
-- **FinOps & Observability:** "You can't manage what you don't measure. Granular LLM spend visibility."
+## Brand Voice
+Pragmatic, sharp, authoritative, zero corporate fluff. We speak engineer-to-engineer.
 
-## 3. Formatting
-- Use structured line breaks. Bullet points for readability. 
-- Professional hashtags: #EnterpriseArchitecture, #LLMOps, #RustLang, #nRouter
+## Core Truths
+- LLM provider outages are inevitable. Downtime shouldn't be your users' problem.
+- Retries and naive backoff add 15-30s of painful latency. Zero-latency routing handles it at the gateway.
+- Security & compliance (RBAC, PII redaction, token budgets) must be infrastructure defaults, not custom code.

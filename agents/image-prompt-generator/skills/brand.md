@@ -1,14 +1,20 @@
-# nRouter Enterprise Brand Identity (Iteration 10)
+# nRouter Image Brand Specification (Authoritative Standard)
+Source of Truth: nrouter-frontend-ui/image_prompt_final/STANDARD.md
 
-## 1. Enterprise Color Palette
-- **Primary/Background:** Deep Navy (`#0F172A`) — conveys security, trust, and enterprise-grade infrastructure.
-- **Accents:** Electric Blue (`#3B82F6`) and Neon Violet (`#8B5CF6`) — conveys modern speed, AI capabilities, and data flow.
-- **Highlights:** Soft Cyan glow — used exclusively for active node connections and critical UI focal points.
+## Surface Contract
+- Master: 3840 × 2160 PNG (4K 16:9) or 3840 × 3840 PNG (1:1 Square)
+- Delivery: 1600 × 900 JPEG under 500KB (Web/Blog) or 1200 × 630 PNG/JPEG (OG Card)
 
-## 2. Visual Aesthetic & Fidelity
-- **Quality Specs:** 4K/8K resolution, ultra-crisp edges, high contrast, perfect geometric symmetry, 32k UHD rendering.
-- **Style Constraints:** Premium Enterprise SaaS aesthetic. Flat vector art, isometric 3D topologies, or subtle glassmorphism (frosted glass overlays).
-- **Core Motifs:** Interconnected network gateways, glowing fiber-optic data streams, minimalist circuit-board traces, abstract representations of Rust-lang gear logic.
+## Color Palette (Strict Rules)
+- Obsidian: #0a0a0b (Matte black background for dark themes)
+- Warm Ink: #211f1b
+- Warm Paper: #fffefa (True/warm white for light themes)
+- Mint: #90FCA6 (CRITICAL: Mint is an ACCENT ONLY, NEVER a flat background)
+- Accents: Use ONE accent family per image. NEVER use generic purple AI gradients.
 
-## 3. Strict Negative Prompting
-- **EXCLUDE:** Photorealism, human faces, generic corporate handshakes, messy chaotic data arrays, low-poly, text, watermarks, grainy artifacts, cluttered compositions.
+## Visual & Content Rules
+- The generated foundation MUST be logo-free and text-free. Final typography and logos are composited deterministically.
+- One focal visual, one clear reading direction, phone-readable hierarchy, generous negative space.
+- Present nRouter STRICTLY as the secure LLM gateway/control layer, NEVER as an AI model.
+- NEVER expose internal ports, credentials, database DSNs, or engine names.
+- STRICT NEGATIVE PROMPTS: generic robot, brain graphic, glowing purple gradient, tangled connectors, random code snippets, fabricated UI charts, human stock photos, watermarks.

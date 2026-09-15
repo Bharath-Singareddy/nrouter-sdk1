@@ -1,11 +1,12 @@
-# nRouter Cinematic Enterprise Identity (Iteration 10)
+# nRouter Cinematic Video Standard
 
-## 1. Cinematic Environment & Lighting
-- **Fidelity:** 8K resolution, hyper-realistic 3D rendering, Unreal Engine 5 level detail, path-traced global illumination.
-- **Setting:** A premium, dimly lit, minimalist tech operations center or abstract void. 
-- **Lighting Physics:** Volumetric light rays spilling from glowing monitors, soft cyan rim lighting separating subjects from deep matte-black backgrounds. 
-- **Color Grade:** High-end cinematic LUT, cool teal-and-orange contrast, deep crushed blacks, perfectly balanced exposure.
+## Master Specifications
+- Resolution: 4K UHD (3840 × 2160) at 24fps film cadence
+- Look: ARRI Alexa 65 sensor, anamorphic 2.39:1 letterbox feel, subtle natural film grain, zero digital sharpness artifacts
+- Lighting: Motivated directional key light (5600K-6500K), volumetric ray dispersion, matte obsidian surfaces with controlled specular highlights
+- Color Grade: High-end commercial grade (clean blacks, natural saturation, controlled teal/mint accents on UI readouts, no oversaturated neons)
 
-## 2. Enterprise Interface Motion
-- **Dashboard UI:** Sleek dark-mode analytics, microscopic pixel-perfect text, glowing real-time traffic graphs, pulsing global node maps.
-- **Motion:** Smooth, weighted, heavy camera physics. No jitter.
+## Content Rules
+- Present nRouter as the mission-critical gateway/control plane for enterprise AI.
+- Interfaces shown must reflect dark-mode minimalist latency and routing metrics.
+- Movement must have physical weight and inertia (dolly, crane, lateral track); zero random camera float.
