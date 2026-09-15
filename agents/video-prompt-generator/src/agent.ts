@@ -1,4 +1,5 @@
 import { nRouter } from '@nrouter_ai/sdk';
+import fs from 'node:fs';
 
 export interface VideoPromptOptions {
   apiKey?: string;
@@ -11,11 +12,11 @@ export async function generateVideoPrompt(options: VideoPromptOptions): Promise<
     apiKey: options.apiKey || process.env.NROUTER_API_KEY,
   });
 
+  const systemBase = fs.readFileSync(new URL('../skills/instructions.md', import.meta.url), 'utf-8');
+
   const response = await client.nr.messages({
     model: process.env.NROUTER_MODEL || 'claude-haiku-4-5-20251001',
-    system: `You are the Video Prompt Generator.
-Generate a highly optimized prompt tailored to the specified video model's strengths (${options.videoModel}). 
-Include camera motion terms and lighting details suitable for this specific architecture.`,
+    system: systemBase + '\n\nTarget Model: ' + options.videoModel,
     messages: [
       {
         role: 'user',

@@ -20,7 +20,8 @@
     "dist",
     "bin",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "skills"
   ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
@@ -39,10 +40,8 @@
   },
   "keywords": [
     "nrouter",
-    "support-agent",
-    "customer-support",
-    "rag",
-    "llm",
+    "image-generator",
+    "prompt-generator",
     "ai-agent"
   ],
   "author": "nRouter <hello@nrouter.ai>",
@@ -50,7 +49,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nRouterGateway/nrouter-sdk.git",
-    "directory": "agents/customer-support-agent"
+    "directory": "agents/image-prompt-generator"
   },
   "bugs": {
     "url": "https://github.com/nRouterGateway/nrouter-sdk/issues"
