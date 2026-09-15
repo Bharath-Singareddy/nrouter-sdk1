@@ -193,19 +193,23 @@ jobs:
             dist/email_preview.html
           retention-days: 30
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
-        continue-on-error: true
-
-      - name: Upload Pages Artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-        continue-on-error: true
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-        continue-on-error: true
+      - name: Deploy to GitHub Pages (gh-pages branch)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TMP_DEPLOY=$(mktemp -d)
+          git clone --branch gh-pages --depth 1 "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" "$TMP_DEPLOY"
+          cp -r dist/* "$TMP_DEPLOY/"
+          touch "$TMP_DEPLOY/.nojekyll"
+          cd "$TMP_DEPLOY"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --staged --quiet; then
+            git commit -m "deploy: update Sentinel status dashboard [skip ci]"
+            git push origin gh-pages
+            echo "Successfully updated gh-pages branch"
+          else
+            echo "No changes to deploy to gh-pages"
+          fi
+          rm -rf "$TMP_DEPLOY"
