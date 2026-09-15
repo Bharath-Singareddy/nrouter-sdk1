@@ -20,7 +20,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 MACHINE_KEYS = ("org.gradle.java.installations.paths", "org.gradle.java.home")
-ABSOLUTE_PATH = re.compile(r"(^|[=,\s])(/opt/|/usr/|/Users/|/home/|/Library/|[A-Za-z]:[\\/])")
+# Any absolute path in a value: a POSIX root or a Windows drive. Not a list of
+# known prefixes, which /nix/store, /snap or /var/lib would walk past.
+ABSOLUTE_PATH = re.compile(r"(^|[=,;\s])(/[^\s/]|[A-Za-z]:[\\/])")
 
 
 def _tracked_gradle_properties() -> list[Path]:

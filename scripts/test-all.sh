@@ -456,7 +456,9 @@ for jdk in /opt/homebrew/opt/openjdk@11/libexec/openjdk.jdk/Contents/Home \
 done
 GRADLE_JDK_ARGS=""
 if [ -n "$GRADLE_JDK_PATHS" ]; then
-  GRADLE_JDK_ARGS="-Porg.gradle.java.installations.paths=$GRADLE_JDK_PATHS"
+  # %q because run_lane re-parses the lane with `bash -c`: a path with a space
+  # must stay one argument.
+  GRADLE_JDK_ARGS=$(printf '%q' "-Porg.gradle.java.installations.paths=$GRADLE_JDK_PATHS")
 fi
 
 if [ -z "${ANDROID_HOME:-}" ]; then
