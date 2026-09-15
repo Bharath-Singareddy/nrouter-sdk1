@@ -58,10 +58,15 @@ public sealed class NRouterError(
      * [cause] is the exception that ended the call, kept so an intermittent
      * failure can be diagnosed: the message names its class and, when it wraps
      * another, the root cause (`UnknownHostException`, `SSLHandshakeException`,
-     * `SocketTimeoutException`, ...). The message is redacted like every other.
+     * `SocketTimeoutException`, ...). The message is redacted like every other,
+     * and so is the attached cause: it is the original exception unless a
+     * message in its chain carries a key, in which case it is a redacted copy
+     * that keeps each class name and stack trace. `@JvmOverloads` keeps the
+     * one-argument constructor that code compiled against earlier versions
+     * links to.
      */
-    public class Transport(message: String, cause: Throwable? = null) :
-        NRouterError(redactKeys(transportMessage(message, cause)), cause = cause)
+    public class Transport @JvmOverloads constructor(message: String, cause: Throwable? = null) :
+        NRouterError(redactKeys(transportMessage(message, cause)), cause = redactedCause(cause))
 
     public class Configuration(message: String) : NRouterError(redactKeys(message))
 
@@ -230,13 +235,12 @@ public fun redactKeys(input: String): String {
 /**
  * The message of a [NRouterError.Transport]: [message], then the class of the
  * exception that ended the call and, when that one wraps another, the root
- * cause's class and message. Bounded, so a cyclic cause chain cannot loop.
+ * cause's class and message. The walk is capped at [MAX_CAUSE_DEPTH] links, so
+ * a cyclic cause chain ends there instead of looping.
  */
 internal fun transportMessage(message: String, cause: Throwable?): String {
     if (cause == null) return message
-    val root = generateSequence(cause) { it.cause?.takeIf { next -> next !== it } }
-        .take(MAX_CAUSE_DEPTH)
-        .last()
+    val root = causeChain(cause).last()
     val detail = if (root === cause) {
         cause.javaClass.name
     } else {
@@ -247,6 +251,37 @@ internal fun transportMessage(message: String, cause: Throwable?): String {
 }
 
 private const val MAX_CAUSE_DEPTH = 16
+
+private fun causeChain(cause: Throwable): List<Throwable> =
+    generateSequence(cause) { it.cause?.takeIf { next -> next !== it } }
+        .take(MAX_CAUSE_DEPTH)
+        .toList()
+
+/**
+ * The cause a [NRouterError.Transport] attaches. Its message and stack trace
+ * are printed by every logger, so a key in it would leak around [redactKeys].
+ * The original exception is kept (a caller can still match on its type) unless
+ * some message in its chain carries a key; then the chain is replaced by
+ * [RedactedCause] copies.
+ */
+internal fun redactedCause(cause: Throwable?): Throwable? {
+    if (cause == null) return null
+    val chain = causeChain(cause)
+    val leaks = chain.any { t -> t.message?.let { redactKeys(it) != it } == true }
+    if (!leaks) return cause
+    return chain.foldRight(null as Throwable?) { t, next -> RedactedCause(t, next) }
+}
+
+/**
+ * A redacted stand-in for one link of a cause chain: the original class name
+ * and redacted message as its message, and the original stack trace.
+ */
+internal class RedactedCause(original: Throwable, cause: Throwable?) :
+    Exception("${original.javaClass.name}: ${redactKeys(original.message.orEmpty())}", cause) {
+    init {
+        stackTrace = original.stackTrace
+    }
+}
 
 /** Structured gateway error envelope. */
 public data class NRouterErrorEnvelope(

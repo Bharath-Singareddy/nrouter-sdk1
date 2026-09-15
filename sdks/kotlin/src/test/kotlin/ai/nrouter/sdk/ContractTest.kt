@@ -779,6 +779,35 @@ class ContractTest {
     }
 
     @Test
+    fun `Transport keeps its one-argument JVM constructor`() {
+        // Code compiled against the one-argument constructor must still link
+        // after an upgrade; a defaulted parameter alone would drop it.
+        val ctor = NRouterError.Transport::class.java.getConstructor(String::class.java)
+        assertEquals("boom", ctor.newInstance("boom").message)
+    }
+
+    @Test
+    fun `a cause carrying a key is attached redacted, never raw`() {
+        val leaky = java.io.IOException(
+            "proxy rejected sk-nrouter-abcdefghijklmnop",
+            java.net.ConnectException("while sending sk-nrouter-zyxwvutsrqponmlk"),
+        )
+        val error = NRouterError.Transport("call failed", leaky)
+        val trace = error.stackTraceToString()
+        assertFalse(trace.contains("abcdefghijklmnop"), trace)
+        assertFalse(trace.contains("zyxwvutsrqponmlk"), trace)
+        assertTrue(trace.contains("java.io.IOException"), trace)
+        assertTrue(trace.contains("java.net.ConnectException"), trace)
+        assertNotNull(error.cause?.cause, "the cause chain was cut")
+    }
+
+    @Test
+    fun `a cause with no key is kept as the original exception`() {
+        val plain = java.net.SocketTimeoutException("timeout")
+        assertSame(plain, NRouterError.Transport("call failed", plain).cause)
+    }
+
+    @Test
     fun `a transport error with no cause keeps its plain message`() {
         assertEquals("Timeout waiting for video job v1", NRouterError.Transport("Timeout waiting for video job v1").message)
     }
