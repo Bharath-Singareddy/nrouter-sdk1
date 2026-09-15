@@ -425,7 +425,7 @@ export const MAX_VIDEO_SECONDS = 1333;
  * The floor on `waitForVideo`'s poll interval.
  *
  * Polling is free of credit charges: retrieving status and downloading content
- * takes no reservation and bills $0. However, polling is not free of rate limits:
+ * takes no reservation and is not billed. However, polling is not free of rate limits:
  * every poll is a metered request against the key's RPM. 250 ms leaves the rate
  * limiter headroom; a tighter loop risks exhausting your RPM budget and receiving
  * HTTP 429 on subsequent requests.
