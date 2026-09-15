@@ -178,15 +178,15 @@ def run_preflight_check(
                 body = json.loads(resp.read().decode("utf-8"))
                 models_found = len(body.get("data", []))
                 catalog_status = "ok"
-                print(f"  ok: GET {url}/models answered 200 in {latency_ms}ms ({models_found} models advertised)")
+                print(f"  ok: GET {models_url} answered 200 in {latency_ms}ms ({models_found} models advertised)")
         except urllib.error.HTTPError as e:
             latency_ms = int((time.perf_counter() - t0) * 1000)
             catalog_status = f"http_{e.code}"
-            print(f"  FAIL: GET {url}/models returned HTTP {e.code}: {e.reason}")
+            print(f"  FAIL: GET {models_url} returned HTTP {e.code}: {e.reason}")
         except Exception as e:
             latency_ms = int((time.perf_counter() - t0) * 1000)
             catalog_status = f"error: {str(e)}"
-            print(f"  FAIL: Connection error to {url}/models: {e}")
+            print(f"  FAIL: Connection error to {models_url}: {e}")
 
     # Run conformance check
     print("\nRunning cross-SDK conformance gate...")
