@@ -12,7 +12,7 @@ export async function generateVideoPrompt(options: VideoPromptOptions): Promise<
   });
 
   const response = await client.chat.completions.create({
-    model: 'nrouter-agent-model',
+    model: 'gemini-3.8-flash-high',
     messages: [
       {
         role: 'system',

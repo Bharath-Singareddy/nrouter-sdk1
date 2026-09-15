@@ -16,7 +16,7 @@ export async function generateSocialMediaContent(options: SocialMediaOptions): P
     : '';
 
   const response = await client.chat.completions.create({
-    model: 'nrouter-agent-model',
+    model: 'gemini-3.8-flash-high',
     messages: [
       {
         role: 'system',
