@@ -15,21 +15,24 @@ export async function generateSocialMediaContent(options: SocialMediaOptions): P
     ? `\n\nPreviously discussed topics (avoid repeating these exact angles):\n- ${options.history.join('\n- ')}` 
     : '';
 
-  const response = await client.chat.completions.create({
-    model: 'gemini-3.8-flash-high',
-    messages: [
-      {
-        role: 'system',
-        content: `You are the nRouter Social Media Content Generator.
+  const response = await client.nr.messages({
+    model: process.env.NROUTER_MODEL || 'claude-haiku-4-5-20251001',
+    system: `You are the nRouter Social Media Content Generator.
 Your goal is to draft viral social media posts (for X/Twitter, LinkedIn, etc.) about nRouter.
-Keep the tone engaging, technical yet accessible. Use relevant hashtags like #AI #DevTools #nRouter.${historyContext}`
-      },
+Keep the tone engaging, technical yet accessible. Use relevant hashtags like #AI #DevTools #nRouter.${historyContext}`,
+    messages: [
       {
         role: 'user',
         content: options.topic
       }
     ],
+    max_tokens: 1024,
   });
 
-  return response.choices[0]?.message?.content || '';
+  const body = response.body as any;
+  const textBlock = body.content?.find((c: any) => c.type === 'text');
+  if (textBlock) {
+    return textBlock.text;
+  }
+  return '';
 }
