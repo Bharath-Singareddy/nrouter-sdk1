@@ -1,0 +1,405 @@
+name: SDK Sentinel
+
+on:
+  schedule:
+    - cron: '43 6 * * *'
+  workflow_dispatch:
+    inputs:
+      live:
+        description: Run billed SDK plus text, image, audio, and video endpoint canaries
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-sentinel
+  cancel-in-progress: false
+
+env:
+  NROUTER_BASE_URL: https://api.nrouter.ai/v1
+  NROUTER_LIVE_CHAT_MODEL: ${{ vars.NROUTER_LIVE_CHAT_MODEL || 'qwen3-max' }}
+  NROUTER_LIVE_RESPONSES_MODEL: ${{ vars.NROUTER_LIVE_RESPONSES_MODEL || 'gpt-4.1-mini' }}
+  NROUTER_LIVE_OPAQUE_MODEL: ${{ vars.NROUTER_LIVE_OPAQUE_MODEL || 'qwen3-max' }}
+  NROUTER_LIVE_MESSAGES_MODEL: claude-haiku-4-5-20251001
+
+jobs:
+  conformance:
+    name: Conformance and guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install contract-test dependencies
+        run: python -m pip install -e "sdks/python[dev]"
+
+      - name: Run repository-wide gates
+        run: |
+          bash tests/sdk-static-catalog-count.test.sh
+          python conformance/check_conformance.py --self-test
+          python conformance/check_conformance.py
+          python scripts/check_sdk_parity.py
+          python scripts/check_live_endpoints.py --self-test
+          python -m pytest -q tests/test_sdk_contract.py tests/test_release_versions.py tests/test_tag_publish_gated.py
+
+      - name: Record result
+        if: ${{ always() }}
+        run: |
+          printf 'sdk,status,live_mode,run_url\nconformance,%s,false,%s\n' \
+            '${{ job.status }}' \
+            'https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
+            > sentinel-conformance.csv
+
+      - name: Upload result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sentinel-status-conformance
+          path: sentinel-conformance.csv
+
+  sdk:
+    name: ${{ matrix.sdk }} SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [js, python, java, kotlin, android, rust, dart, r, go]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: matrix.sdk == 'js'
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: matrix.sdk == 'python'
+        with:
+          python-version: '3.13'
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        if: contains(fromJSON('["java", "kotlin", "android"]'), matrix.sdk)
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        if: contains(fromJSON('["kotlin", "android"]'), matrix.sdk)
+        uses: gradle/actions/setup-gradle@6cfc8b8e8bb586cc164bef1c478c1eea3a4d6a19 # v3
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        if: matrix.sdk == 'rust'
+        with:
+          components: rustfmt, clippy
+
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1
+        if: matrix.sdk == 'dart'
+        with:
+          sdk: stable
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: matrix.sdk == 'go'
+        with:
+          go-version: '1.21'
+
+      - uses: r-lib/actions/setup-r@v2
+        if: matrix.sdk == 'r'
+        with:
+          r-version: release
+
+      - uses: r-lib/actions/setup-pandoc@v2
+        if: matrix.sdk == 'r'
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        if: matrix.sdk == 'r'
+        with:
+          working-directory: sdks/r
+          extra-packages: any::rcmdcheck
+          needs: check
+
+      - name: Install Android SDK components
+        if: matrix.sdk == 'android'
+        run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-34' 'build-tools;34.0.0' 'platform-tools'
+
+      - name: Run offline validation
+        env:
+          SDK: ${{ matrix.sdk }}
+        run: |
+          set -euo pipefail
+          case "$SDK" in
+            js)
+              cd sdks/js
+              npm ci
+              npm test
+              ;;
+            python)
+              cd sdks/python
+              python -m pip install -e ".[dev]"
+              mypy nroutersdk
+              ruff check nroutersdk
+              python -m pytest -q
+              ;;
+            java)
+              cd sdks/java
+              mvn -B clean test
+              ;;
+            kotlin)
+              cd sdks/kotlin
+              ./gradlew clean check publishToMavenLocal --stacktrace
+              ;;
+            android)
+              cd sdks/kotlin
+              ./gradlew publishToMavenLocal --stacktrace
+              cd ../android
+              ./gradlew clean build publishToMavenLocal --stacktrace
+              ;;
+            rust)
+              cd sdks/rust
+              cargo fmt --check
+              cargo clippy --all-targets -- -D warnings
+              cargo test --locked
+              ;;
+            dart)
+              cd sdks/dart
+              dart pub get
+              dart analyze --fatal-infos
+              dart test
+              ;;
+            r)
+              cd sdks
+              R CMD build r
+              R CMD check nrouter_*.tar.gz --as-cran --no-manual
+              ;;
+            go)
+              cd sdks/go
+              test -z "$(gofmt -l .)"
+              go vet ./...
+              go test -race -count=1 ./...
+              ;;
+          esac
+
+      - name: Run billed gateway canary
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.live == 'true' }}
+        env:
+          SDK: ${{ matrix.sdk }}
+          NROUTER_LIVE: '1'
+          NROUTER_API_KEY: ${{ secrets.NROUTER_SDK_MONITOR_API_KEY || secrets.NROUTER_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$NROUTER_API_KEY"
+          case "$SDK" in
+            js)
+              cd sdks/js
+              node --test --test-name-pattern='live Claude Messages request' test/live.test.ts
+              ;;
+            python)
+              cd sdks/python
+              python -m pytest -q tests/test_live.py::test_live_claude_messages_returns_billing_metadata
+              ;;
+            java)
+              cd sdks/java
+              mvn -B '-Dtest=LiveTest#liveClaudeRequestReturnsBillingMetadata' test
+              ;;
+            kotlin)
+              cd sdks/kotlin
+              ./gradlew test --tests 'ai.nrouter.sdk.LiveTest.live Claude stream reaches the configured gateway' --stacktrace
+              ;;
+            android)
+              cd sdks/android
+              ./gradlew testDebugUnitTest --tests 'ai.nrouter.sdk.android.LiveTest' --stacktrace
+              ;;
+            rust)
+              cd sdks/rust
+              for attempt in 1 2 3; do
+                cargo test --locked --test live live_claude_stream_reaches_the_configured_gateway -- --ignored --nocapture && exit 0
+                test "$attempt" -eq 3 || sleep "$((attempt * 5))"
+              done
+              exit 1
+              ;;
+            dart)
+              cd sdks/dart
+              dart test test/live_test.dart
+              ;;
+            r)
+              cd sdks/r
+              Rscript -e "testthat::test_file('tests/testthat/test-live.R')"
+              ;;
+            go)
+              cd sdks/go
+              go test -run '^TestLiveClaude$' -count=1 -v
+              ;;
+          esac
+
+      - name: Record result
+        if: ${{ always() }}
+        env:
+          SDK: ${{ matrix.sdk }}
+          LIVE_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.live == 'true' || false }}
+        run: |
+          printf 'sdk,status,live_mode,run_url\n%s,%s,%s,%s\n' \
+            "$SDK" '${{ job.status }}' "$LIVE_MODE" \
+            'https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
+            > "sentinel-$SDK.csv"
+
+      - name: Upload result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sentinel-status-${{ matrix.sdk }}
+          path: sentinel-${{ matrix.sdk }}.csv
+
+  swift:
+    name: swift SDK
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Run offline validation
+        run: |
+          swift test
+          cd sdks/swift
+          swift test
+
+      - name: Run billed gateway canary
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.live == 'true' }}
+        working-directory: sdks/swift
+        env:
+          NROUTER_LIVE: '1'
+          NROUTER_API_KEY: ${{ secrets.NROUTER_SDK_MONITOR_API_KEY || secrets.NROUTER_API_KEY }}
+        run: |
+          test -n "$NROUTER_API_KEY"
+          swift test --filter LiveTests/testLiveClaudeStream
+
+      - name: Record result
+        if: ${{ always() }}
+        env:
+          LIVE_MODE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.live == 'true' || false }}
+        run: |
+          printf 'sdk,status,live_mode,run_url\nswift,%s,%s,%s\n' \
+            '${{ job.status }}' "$LIVE_MODE" \
+            'https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}' \
+            > sentinel-swift.csv
+
+      - name: Upload result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sentinel-status-swift
+          path: sentinel-swift.csv
+
+  endpoints:
+    name: Live endpoint matrix
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.live == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+
+      - name: Install Python SDK
+        run: python -m pip install -e sdks/python
+
+      - name: Probe every live endpoint
+        env:
+          NROUTER_API_KEY: ${{ secrets.NROUTER_SDK_MONITOR_API_KEY || secrets.NROUTER_API_KEY }}
+          NROUTER_LIVE_CHAT_MODEL: ${{ vars.NROUTER_LIVE_CHAT_MODEL || 'qwen3-max' }}
+          NROUTER_LIVE_RESPONSES_MODEL: ${{ vars.NROUTER_LIVE_RESPONSES_MODEL || 'gpt-4.1-mini' }}
+          NROUTER_LIVE_EMBEDDINGS_MODEL: ${{ vars.NROUTER_LIVE_EMBEDDINGS_MODEL || 'text-embedding-3-small' }}
+          NROUTER_LIVE_IMAGE_MODEL: ${{ vars.NROUTER_LIVE_IMAGE_MODEL || 'gpt-image-1-mini' }}
+          NROUTER_LIVE_SPEECH_MODEL: ${{ vars.NROUTER_LIVE_SPEECH_MODEL || 'tts-1' }}
+          NROUTER_LIVE_TRANSCRIPTION_MODEL: ${{ vars.NROUTER_LIVE_TRANSCRIPTION_MODEL || 'whisper-1' }}
+          NROUTER_LIVE_TRANSLATION_MODEL: ${{ vars.NROUTER_LIVE_TRANSLATION_MODEL || 'whisper-1' }}
+          NROUTER_LIVE_VIDEO_MODEL: ${{ vars.NROUTER_LIVE_VIDEO_MODEL || 'sora-2' }}
+        run: python scripts/check_live_endpoints.py
+
+      - name: Upload endpoint report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdk-sentinel-endpoints
+          path: sdk-sentinel-endpoints.csv
+          if-no-files-found: warn
+
+  report:
+    name: Combined SDK report
+    if: ${{ always() }}
+    needs: [conformance, sdk, swift, endpoints]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download SDK results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: sentinel-status-*
+          path: sentinel-results
+          merge-multiple: true
+
+      - name: Download endpoint results
+        if: ${{ needs.endpoints.result != 'skipped' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sdk-sentinel-endpoints
+          path: endpoint-results
+
+      - name: Build CSV and job summary
+        run: |
+          python - <<'PY'
+          import csv
+          import glob
+          import os
+
+          rows = []
+          for path in glob.glob('sentinel-results/*.csv'):
+              with open(path, newline='', encoding='utf-8') as handle:
+                  rows.extend(csv.DictReader(handle))
+          rows.sort(key=lambda row: (row['sdk'] == 'conformance', row['sdk']))
+
+          with open('sdk-sentinel-report.csv', 'w', newline='', encoding='utf-8') as handle:
+              writer = csv.DictWriter(handle, fieldnames=['sdk', 'status', 'live_mode', 'run_url'])
+              writer.writeheader()
+              writer.writerows(rows)
+
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('## SDK Sentinel\n\n')
+              summary.write('| SDK | Result | Live canary |\n| --- | --- | --- |\n')
+              for row in rows:
+                  summary.write(f"| {row['sdk']} | {row['status']} | {row['live_mode']} |\n")
+              endpoint_reports = glob.glob('endpoint-results/*.csv')
+              if endpoint_reports:
+                  with open(endpoint_reports[0], newline='', encoding='utf-8') as handle:
+                      endpoints = list(csv.DictReader(handle))
+                  summary.write('\n## Live endpoints\n\n')
+                  summary.write('| Method | Endpoint | Model | Result |\n| --- | --- | --- | --- |\n')
+                  for endpoint in endpoints:
+                      summary.write(
+                          f"| {endpoint['method']} | {endpoint['endpoint']} | "
+                          f"{endpoint['model'] or '—'} | {endpoint['status']} |\n"
+                      )
+          PY
+
+      - name: Upload combined report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdk-sentinel-report
+          path: sdk-sentinel-report.csv
+
+      - name: Fail when any SDK failed
+        if: ${{ needs.conformance.result != 'success' || needs.sdk.result != 'success' || needs.swift.result != 'success' || (needs.endpoints.result != 'success' && needs.endpoints.result != 'skipped') }}
+        run: exit 1
