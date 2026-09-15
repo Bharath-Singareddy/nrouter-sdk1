@@ -491,7 +491,7 @@ fn test_parses_funding_source_and_allowance_reset() {
 #[test]
 fn test_plan_limits_map_to_credit_error() {
     use nrouter::errors::{ErrorBody, NRouterError};
-    
+
     let mut body1 = ErrorBody::default();
     body1.status = Some(402);
     body1.limit_source = Some("plan_allowance_exhausted".into());
