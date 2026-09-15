@@ -53,7 +53,7 @@ DEFAULT_CANARY_TARGETS: Dict[str, Dict[str, str]] = {
     },
     "js": {
         "provider": "anthropic",
-        "model": "claude-3-5-haiku-20241022",
+        "model": "claude-haiku-4-5-20251001",
         "endpoint": "/v1/messages",
     },
     "go": {
@@ -63,7 +63,7 @@ DEFAULT_CANARY_TARGETS: Dict[str, Dict[str, str]] = {
     },
     "rust": {
         "provider": "anthropic",
-        "model": "claude-3-5-haiku-20241022",
+        "model": "claude-haiku-4-5-20251001",
         "endpoint": "/v1/messages",
     },
     "java": {
@@ -78,7 +78,7 @@ DEFAULT_CANARY_TARGETS: Dict[str, Dict[str, str]] = {
     },
     "swift": {
         "provider": "anthropic",
-        "model": "claude-3-5-haiku-20241022",
+        "model": "claude-haiku-4-5-20251001",
         "endpoint": "/v1/messages",
     },
     "dart": {
@@ -93,7 +93,7 @@ DEFAULT_CANARY_TARGETS: Dict[str, Dict[str, str]] = {
     },
     "r": {
         "provider": "anthropic",
-        "model": "claude-3-5-haiku-20241022",
+        "model": "claude-haiku-4-5-20251001",
         "endpoint": "/v1/messages",
     },
 }

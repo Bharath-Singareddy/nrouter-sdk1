@@ -362,7 +362,7 @@ def main() -> int:
         providers = ["openai", "anthropic", "qwen"]
         for i, s in enumerate(all_sdks):
             p = providers[i % len(providers)]
-            m = "claude-3-5-haiku-20241022" if p == "anthropic" else ("qwen-turbo" if p == "qwen" else "openai/gpt-4o-mini")
+            m = "claude-haiku-4-5-20251001" if p == "anthropic" else ("qwen-turbo" if p == "qwen" else "openai/gpt-4o-mini")
             ep = "/v1/messages" if p == "anthropic" else "/v1/chat/completions"
             results.append({
                 "sdk": s,
