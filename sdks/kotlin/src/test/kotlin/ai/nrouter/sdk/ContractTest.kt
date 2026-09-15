@@ -821,6 +821,42 @@ class ContractTest {
     }
 
     @Test
+    fun `a shared cause graph is copied once per node, not once per path`() {
+        // Each level reaches the next three ways (cause + two suppressed), so a copy
+        // that walks paths instead of nodes does 3^14 work and never returns.
+        var node: Throwable = java.io.IOException("bottom has sk-nrouter-abcdefghijklmnop")
+        repeat(14) {
+            val next = node
+            node = java.io.IOException("level $it", next).apply { addSuppressed(next); addSuppressed(next) }
+        }
+        val root = node
+        var error: NRouterError.Transport? = null
+        val worker = Thread { error = NRouterError.Transport("call failed", root) }.apply { isDaemon = true }
+        worker.start()
+        worker.join(5_000)
+        assertFalse(worker.isAlive, "redacting a 15-node shared graph did not finish in 5 s")
+        val built = assertNotNull(error)
+        val copies = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+        val queue = ArrayDeque<Throwable>(listOfNotNull(built.cause))
+        while (queue.isNotEmpty()) {
+            val t = queue.removeFirst()
+            if (!copies.add(t)) continue
+            t.cause?.let { queue.add(it) }
+            t.suppressed.forEach { queue.add(it) }
+        }
+        assertTrue(copies.size <= 15, "copied ${copies.size} throwables for a 15-node graph")
+        assertFalse(built.stackTraceToString().contains("abcdefghijklmnop"))
+    }
+
+    @Test
+    fun `a cause graph too large to inspect is redacted, not trusted`() {
+        var chain: Throwable = java.io.IOException("clean root")
+        repeat(80) { chain = java.io.IOException("wrapper $it", chain) }
+        val error = NRouterError.Transport("call failed", chain)
+        assertTrue(error.cause is RedactedCause, "an 81-throwable graph was attached unchecked")
+    }
+
+    @Test
     fun `a cause with no key is kept as the original exception`() {
         val plain = java.net.SocketTimeoutException("timeout")
         assertSame(plain, NRouterError.Transport("call failed", plain).cause)

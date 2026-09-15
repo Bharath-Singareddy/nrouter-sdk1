@@ -298,19 +298,34 @@ internal fun redactedCause(cause: Throwable?): Throwable? {
     val all = reachable(cause)
     val leaks = all == null || all.any { t -> t.message?.let { redactKeys(it) != it } == true }
     if (!leaks) return cause
-    return redactedCopy(cause, 0)
+    return redactedCopy(cause)
 }
 
 /**
- * A redacted copy of [t], its cause chain and its suppressed exceptions, bounded
- * at [MAX_CAUSE_DEPTH] levels: whatever lies deeper is left out, never copied raw.
+ * A redacted copy of [root], its cause chain and its suppressed exceptions.
+ *
+ * One copy per original throwable, found by identity, so a graph that shares a
+ * node through several paths (a diamond through `cause` and `suppressed`) costs
+ * one copy per node rather than one per path. A back edge to a node still being
+ * copied (a cycle) is left out, as is anything past [MAX_CAUSE_DEPTH] levels or
+ * [MAX_CAUSE_NODES] copies: left out, never attached raw.
  */
-private fun redactedCopy(t: Throwable, depth: Int): Throwable {
-    val deeper = depth + 1 < MAX_CAUSE_DEPTH
-    val next = t.cause?.takeIf { deeper && it !== t }?.let { redactedCopy(it, depth + 1) }
-    val copy = RedactedCause(t, next)
-    if (deeper) t.suppressed.forEach { copy.addSuppressed(redactedCopy(it, depth + 1)) }
-    return copy
+private fun redactedCopy(root: Throwable): Throwable {
+    val copies = java.util.IdentityHashMap<Throwable, Throwable>()
+    val inProgress = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+    var budget = MAX_CAUSE_NODES
+    fun copy(t: Throwable, depth: Int): Throwable? {
+        copies[t]?.let { return it }
+        if (t in inProgress || budget <= 0 || depth >= MAX_CAUSE_DEPTH) return null
+        budget--
+        inProgress.add(t)
+        val redacted = RedactedCause(t, t.cause?.let { copy(it, depth + 1) })
+        t.suppressed.forEach { s -> copy(s, depth + 1)?.let { if (it !== redacted) redacted.addSuppressed(it) } }
+        inProgress.remove(t)
+        copies[t] = redacted
+        return redacted
+    }
+    return copy(root, 0) ?: RedactedCause(root, null)
 }
 
 /**
