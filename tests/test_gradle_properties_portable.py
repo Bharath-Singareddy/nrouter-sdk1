@@ -37,8 +37,12 @@ def test_there_are_gradle_properties_to_check() -> None:
 
 
 def test_no_committed_gradle_properties_names_a_machine_jdk() -> None:
+    files = _tracked_gradle_properties()
+    # Checked here too, not only in the test above: run alone, an empty list
+    # would make this invariant pass having inspected nothing.
+    assert files, "no tracked gradle.properties found; the check below would be vacuous"
     offenders = []
-    for path in _tracked_gradle_properties():
+    for path in files:
         for number, line in enumerate(path.read_text().splitlines(), 1):
             stripped = line.strip()
             if not stripped or stripped.startswith(("#", "!")):
