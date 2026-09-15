@@ -60,8 +60,10 @@ public sealed class NRouterError(
      * another, the root cause (`UnknownHostException`, `SSLHandshakeException`,
      * `SocketTimeoutException`, ...). The message is redacted like every other,
      * and so is the attached cause: it is the original exception unless a
-     * message in its chain carries a key, in which case it is a redacted copy
-     * that keeps each class name and stack trace. `@JvmOverloads` keeps the
+     * message reachable through its cause chain or suppressed exceptions
+     * carries a key (or there are too many to inspect), in which case it is a
+     * redacted copy that keeps each class name and stack trace but not the
+     * original exception types. `@JvmOverloads` keeps the
      * one-argument constructor that code compiled against earlier versions
      * links to.
      */
@@ -257,24 +259,63 @@ private fun causeChain(cause: Throwable): List<Throwable> =
         .take(MAX_CAUSE_DEPTH)
         .toList()
 
+/** How many throwables [redactedCause] inspects before it stops trusting the graph. */
+private const val MAX_CAUSE_NODES = 64
+
 /**
- * The cause a [NRouterError.Transport] attaches. Its message and stack trace
- * are printed by every logger, so a key in it would leak around [redactKeys].
- * The original exception is kept (a caller can still match on its type) unless
- * some message in its chain carries a key; then the chain is replaced by
- * [RedactedCause] copies.
+ * Every throwable reachable from [root] through `cause` AND `suppressed`, or
+ * `null` when there are more than [MAX_CAUSE_NODES] — a graph that cannot be
+ * inspected in full cannot be declared clean.
  */
-internal fun redactedCause(cause: Throwable?): Throwable? {
-    if (cause == null) return null
-    val chain = causeChain(cause)
-    val leaks = chain.any { t -> t.message?.let { redactKeys(it) != it } == true }
-    if (!leaks) return cause
-    return chain.foldRight(null as Throwable?) { t, next -> RedactedCause(t, next) }
+private fun reachable(root: Throwable): List<Throwable>? {
+    val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+    val queue = ArrayDeque<Throwable>()
+    queue.add(root)
+    while (queue.isNotEmpty()) {
+        val t = queue.removeFirst()
+        if (!seen.add(t)) continue
+        if (seen.size > MAX_CAUSE_NODES) return null
+        t.cause?.let { queue.add(it) }
+        t.suppressed.forEach { queue.add(it) }
+    }
+    return seen.toList()
 }
 
 /**
- * A redacted stand-in for one link of a cause chain: the original class name
- * and redacted message as its message, and the original stack trace.
+ * The cause a [NRouterError.Transport] attaches. Its message, its cause chain
+ * and its suppressed exceptions are all printed by every logger, so a key in
+ * any of them would leak around [redactKeys].
+ *
+ * The original exception is kept — a caller can still match on its type — only
+ * when every throwable reachable through `cause` and `suppressed` is inspected
+ * and none carries a key. Otherwise (a key anywhere, or a graph too large to
+ * inspect in full) the cause is a tree of [RedactedCause] copies: the original
+ * class names and stack traces survive in them, the original TYPES do not. That
+ * trade is deliberate: a key never reaches a log to keep an `is IOException`.
+ */
+internal fun redactedCause(cause: Throwable?): Throwable? {
+    if (cause == null) return null
+    val all = reachable(cause)
+    val leaks = all == null || all.any { t -> t.message?.let { redactKeys(it) != it } == true }
+    if (!leaks) return cause
+    return redactedCopy(cause, 0)
+}
+
+/**
+ * A redacted copy of [t], its cause chain and its suppressed exceptions, bounded
+ * at [MAX_CAUSE_DEPTH] levels: whatever lies deeper is left out, never copied raw.
+ */
+private fun redactedCopy(t: Throwable, depth: Int): Throwable {
+    val deeper = depth + 1 < MAX_CAUSE_DEPTH
+    val next = t.cause?.takeIf { deeper && it !== t }?.let { redactedCopy(it, depth + 1) }
+    val copy = RedactedCause(t, next)
+    if (deeper) t.suppressed.forEach { copy.addSuppressed(redactedCopy(it, depth + 1)) }
+    return copy
+}
+
+/**
+ * A redacted stand-in for one throwable: the original class name and redacted
+ * message as its message, and the original stack trace.
  */
 internal class RedactedCause(original: Throwable, cause: Throwable?) :
     Exception("${original.javaClass.name}: ${redactKeys(original.message.orEmpty())}", cause) {

@@ -802,6 +802,25 @@ class ContractTest {
     }
 
     @Test
+    fun `a key in a SUPPRESSED exception is redacted too`() {
+        // try-with-resources cleanup attaches its own failure as suppressed, and every
+        // logger prints `Suppressed:` blocks with the stack trace.
+        val cause = java.io.IOException("socket closed")
+        cause.addSuppressed(IllegalStateException("close failed for sk-nrouter-abcdefghijklmnop"))
+        val trace = NRouterError.Transport("call failed", cause).stackTraceToString()
+        assertFalse(trace.contains("abcdefghijklmnop"), trace)
+        assertTrue(trace.contains("java.lang.IllegalStateException"), trace)
+    }
+
+    @Test
+    fun `a key deeper than the walk bound is redacted, not trusted`() {
+        var chain: Throwable = java.io.IOException("root has sk-nrouter-abcdefghijklmnop")
+        repeat(40) { chain = java.io.IOException("wrapper $it", chain) }
+        val trace = NRouterError.Transport("call failed", chain).stackTraceToString()
+        assertFalse(trace.contains("abcdefghijklmnop"), trace)
+    }
+
+    @Test
     fun `a cause with no key is kept as the original exception`() {
         val plain = java.net.SocketTimeoutException("timeout")
         assertSame(plain, NRouterError.Transport("call failed", plain).cause)
