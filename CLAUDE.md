@@ -77,7 +77,6 @@ when you touch that area. If you read nothing else, read the first one.
 - `~/nr/nrouter-brain/nrouter-infra-cicd/rules/08-database.md`
 - `~/nr/nrouter-brain/nrouter-infra-cicd/rules/15-startup-health.md`
 - `~/nr/nrouter-brain/nrouter-infra-cicd/rules/16-infrastructure.md`
-- `~/nr/nrouter-brain/nrouter-manage-company/rules/19-soc2-new-feature-checklist.md`
 - `~/nr/nrouter-brain/nrouter-rust-gateway/rules/00-gateway-rules.md`
 - `~/nr/nrouter-brain/nrouter-rust-gateway/rules/01-provider-contract.md`
 
