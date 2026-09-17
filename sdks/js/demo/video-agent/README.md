@@ -25,6 +25,24 @@ export NROUTER_VIDEO_PROMPT="$(node video-prompt-generator.mjs \
 node video-agent.mjs
 ```
 
+## Use the webpage
+
+Keep the API key in `sdks/js/demo/video-agent/.env`. The file is ignored by
+Git and the key is read only by the local Node server; it is never placed in
+the webpage or browser storage.
+
+```bash
+cd sdks/js
+npm run build
+cd demo/video-agent
+cp .env.example .env
+# Edit .env and set: NROUTER_API_KEY=sk-nrouter-...
+npm run web
+```
+
+Open `http://127.0.0.1:4318`. Building and copying prompts is free. The webpage
+asks for confirmation immediately before the billed video request.
+
 Video is the only *asynchronous* wire nRouter serves. The other modalities hand
 you the product in the response; `POST /v1/videos` hands you a **job** and you
 collect the result over two more calls. That split is the whole reason this

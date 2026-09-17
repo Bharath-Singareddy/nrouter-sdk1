@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>nRouter Video Prompt Studio</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">nRouter SDK</p>
+          <h1>Video Prompt Studio</h1>
+          <p>Shape a precise prompt locally, then send one deliberate video render.</p>
+        </div>
+        <div id="keyStatus" class="status">Checking API key…</div>
+      </header>
+
+      <section class="card">
+        <form id="promptForm">
+          <label class="wide">Video idea <textarea name="idea" required rows="3" placeholder="A red fox crossing a snowy forest"></textarea></label>
+          <label>Action <input name="action" placeholder="walking slowly through fresh snow" /></label>
+          <label>Scene <input name="scene" placeholder="pine forest at dawn" /></label>
+          <label>Camera <input name="camera" placeholder="slow side-tracking shot" /></label>
+          <label>Lighting <input name="lighting" placeholder="soft winter dawn" /></label>
+          <label>Style <input name="style" placeholder="cinematic photorealism" /></label>
+          <label>Mood <input name="mood" placeholder="quiet and curious" /></label>
+          <label class="wide">Avoid <input name="avoid" placeholder="text, logos, sudden cuts" /></label>
+          <button type="submit">Build prompt</button>
+        </form>
+      </section>
+
+      <section class="card result">
+        <div class="row">
+          <h2>Generated prompt</h2>
+          <button id="copyBtn" class="secondary" type="button">Copy</button>
+        </div>
+        <textarea id="generatedPrompt" rows="7" placeholder="Your generated prompt will appear here."></textarea>
+      </section>
+
+      <section class="card render">
+        <div class="row"><h2>Render video</h2><span class="cost">Uses credits</span></div>
+        <div class="renderGrid">
+          <label>Model <input id="model" value="sora-2" /></label>
+          <label>Seconds <input id="seconds" type="number" min="1" max="1333" value="4" /></label>
+          <label>Size <input id="size" value="1280x720" /></label>
+        </div>
+        <p class="note">Creating a video is billed. Polling and downloading the finished video are free.</p>
+        <button id="renderBtn" type="button">Generate video</button>
+        <p id="message" class="message"></p>
+        <video id="video" controls hidden></video>
+        <pre id="meta" hidden></pre>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const CONSISTENCY =
@@ -10,7 +11,7 @@ function clean(value) {
   return value?.trim().replace(/\s+/g, ' ');
 }
 
-function buildVideoPrompt({ idea, action, scene, camera, lighting, style, mood, avoid } = {}) {
+export function buildVideoPrompt({ idea, action, scene, camera, lighting, style, mood, avoid } = {}) {
   const subject = clean(idea);
   if (!subject) throw new Error('A video idea is required.');
 
@@ -96,4 +97,4 @@ function main() {
   }
 }
 
-main();
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) main();
