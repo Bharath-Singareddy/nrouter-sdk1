@@ -5,7 +5,8 @@
   "description": "nRouter video agent: create, poll and download one generation job, proving that the create bills and the collection is free.",
   "engines": { "node": ">=22.18" },
   "scripts": {
+    "prompt": "node video-prompt-generator.mjs",
     "start": "node video-agent.mjs",
-    "test": "node ../video_agent_suite.js"
+    "test": "node video-prompt-generator.mjs --self-test && node ../video_agent_suite.js"
   }
 }

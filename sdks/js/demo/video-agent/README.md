@@ -3,6 +3,28 @@
 A complete video generation in one file: **create → poll → download**, with the
 one call that costs money accounted for separately from the four that do not.
 
+## Build a video prompt without spending credits
+
+Use the local prompt generator to turn a short idea into a clear video prompt:
+
+```bash
+node video-prompt-generator.mjs "A red fox crossing a snowy forest" \
+  --camera "slow side-tracking shot" \
+  --lighting "soft winter dawn" \
+  --style "cinematic photorealism" \
+  --mood "quiet and curious" \
+  --avoid "text, logos, sudden cuts"
+```
+
+It uses only Node.js and does not call the gateway. Pass the result to the video
+agent only when you are ready to start a billed render:
+
+```bash
+export NROUTER_VIDEO_PROMPT="$(node video-prompt-generator.mjs \
+  'A red fox crossing a snowy forest' --camera 'slow side-tracking shot')"
+node video-agent.mjs
+```
+
 Video is the only *asynchronous* wire nRouter serves. The other modalities hand
 you the product in the response; `POST /v1/videos` hands you a **job** and you
 collect the result over two more calls. That split is the whole reason this
