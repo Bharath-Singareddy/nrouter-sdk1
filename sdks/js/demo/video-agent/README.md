@@ -32,9 +32,7 @@ Git and the key is read only by the local Node server; it is never placed in
 the webpage or browser storage.
 
 ```bash
-cd sdks/js
-npm run build
-cd demo/video-agent
+cd sdks/js/demo/video-agent
 cp .env.example .env
 # Edit .env and set: NROUTER_API_KEY=sk-nrouter-...
 npm run web

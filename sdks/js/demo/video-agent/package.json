@@ -7,7 +7,7 @@
   "scripts": {
     "prompt": "node video-prompt-generator.mjs",
     "start": "node video-agent.mjs",
-    "test": "node video-prompt-generator.mjs --self-test && node ../video_agent_suite.js",
+    "test": "node video-prompt-generator.mjs --self-test && node web-server.mjs --self-test && node ../video_agent_suite.js",
     "web": "node --env-file-if-exists=.env web-server.mjs"
   }
 }

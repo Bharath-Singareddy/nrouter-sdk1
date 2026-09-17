@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import assert from 'node:assert/strict';
 import { createReadStream } from 'node:fs';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -52,6 +53,42 @@ function extensionFor(contentType) {
   return 'mp4';
 }
 
+function validateVideoInput({ model, prompt, seconds, size }) {
+  if (!model) throw new Error('A video model is required.');
+  if (!prompt) throw new Error('Generate or enter a video prompt first.');
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 1333) {
+    throw new Error('Seconds must be a number from 1 through 1333.');
+  }
+  const match = /^(\d+)x(\d+)$/.exec(size);
+  if (!match || Number(match[1]) < 1 || Number(match[2]) < 1) {
+    throw new Error('Size must use WIDTHxHEIGHT, for example 1280x720.');
+  }
+}
+
+function gatewayError(payload, status) {
+  return payload?.error?.message || payload?.message || `Gateway request failed (${status}).`;
+}
+
+function costFrom(headers) {
+  const raw = headers.get('x-nr-request-cost');
+  if (raw === null || !/^(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(raw.trim())) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && !(value === 0 && /[1-9]/.test(raw)) ? value : null;
+}
+
+async function gatewayJson(baseUrl, key, route, options = {}) {
+  const response = await fetch(`${baseUrl}${route}`, {
+    ...options,
+    headers: {
+      authorization: `Bearer ${key}`,
+      ...(options.body ? { 'content-type': 'application/json' } : {}),
+    },
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(gatewayError(payload, response.status));
+  return { payload, headers: response.headers };
+}
+
 async function serveFile(res, file) {
   const info = await stat(file);
   res.writeHead(200, {
@@ -70,42 +107,70 @@ async function createVideo(body) {
   }
 
   const prompt = String(body.prompt || '').trim();
-  if (!prompt) throw new Error('Generate or enter a video prompt first.');
-
-  const { nRouter } = await import('../../dist/index.mjs');
-  const client = new nRouter({
-    apiKey: process.env.NROUTER_API_KEY,
-    baseURL: process.env.NROUTER_BASE_URL || 'https://api.nrouter.ai/v1',
-    maxRetries: 0,
-  });
   const model = String(body.model || process.env.NROUTER_VIDEO_MODEL || 'sora-2').trim();
   const seconds = Number(body.seconds || process.env.NROUTER_VIDEO_SECONDS || 4);
   const size = String(body.size || process.env.NROUTER_VIDEO_SIZE || '1280x720').trim();
+  validateVideoInput({ model, prompt, seconds, size });
 
-  const created = await client.nr.media.video({ model, prompt, seconds, size });
-  const jobId = created.body?.id;
+  const baseUrl = (process.env.NROUTER_BASE_URL || 'https://api.nrouter.ai/v1').replace(/\/$/, '');
+  const key = process.env.NROUTER_API_KEY;
+  const created = await gatewayJson(baseUrl, key, '/videos', {
+    method: 'POST',
+    body: JSON.stringify({ model, prompt, seconds: String(seconds), size }),
+  });
+  const jobId = created.payload?.id;
   if (typeof jobId !== 'string' || !jobId) throw new Error('The gateway accepted the request but returned no video job ID.');
 
-  await client.nr.media.waitForVideo(jobId, {
-    pollIntervalMs: Number(process.env.NROUTER_VIDEO_POLL_MS || 5_000),
-    timeoutMs: Number(process.env.NROUTER_VIDEO_TIMEOUT_MS || 600_000),
+  const pollMs = Number(process.env.NROUTER_VIDEO_POLL_MS || 5_000);
+  const deadline = Date.now() + Number(process.env.NROUTER_VIDEO_TIMEOUT_MS || 600_000);
+  let completed = false;
+  while (Date.now() < deadline) {
+    const statusResult = await gatewayJson(baseUrl, key, `/videos/${encodeURIComponent(jobId)}`);
+    const status = String(statusResult.payload?.status || '').toLowerCase();
+    if (status === 'completed' || status === 'succeeded') {
+      completed = true;
+      break;
+    }
+    if (status === 'failed' || status === 'cancelled') throw new Error(`Video job ended with status: ${status}.`);
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  if (!completed) throw new Error('Timed out waiting for the video. The paid job may still be rendering; do not create a duplicate.');
+
+  const contentResponse = await fetch(`${baseUrl}/videos/${encodeURIComponent(jobId)}/content`, {
+    headers: { authorization: `Bearer ${key}` },
   });
-  const content = await client.nr.media.videoContent(jobId);
-  const extension = extensionFor(content.contentType);
+  if (!contentResponse.ok) {
+    const payload = await contentResponse.json().catch(() => ({}));
+    throw new Error(gatewayError(payload, contentResponse.status));
+  }
+  const contentType = contentResponse.headers.get('content-type') || 'video/mp4';
+  const bytes = Buffer.from(await contentResponse.arrayBuffer());
+  const extension = extensionFor(contentType);
   const filename = `video-${Date.now()}.${extension}`;
   await mkdir(OUT_DIR, { recursive: true });
-  await writeFile(path.join(OUT_DIR, filename), content.bytes);
+  await writeFile(path.join(OUT_DIR, filename), bytes);
 
   return {
     jobId,
     model,
     seconds,
     size,
-    cost: created.meta?.cost ?? null,
-    costStatus: created.meta?.costStatus ?? null,
-    requestId: created.meta?.requestId ?? null,
+    cost: costFrom(created.headers),
+    costStatus: created.headers.get('x-nr-cost-status'),
+    requestId: created.headers.get('x-nr-request-id'),
     videoUrl: `/output/${filename}`,
   };
+}
+
+function selfTest() {
+  validateVideoInput({ model: 'sora-2', prompt: 'A blue circle', seconds: 4, size: '1280x720' });
+  assert.throws(() => validateVideoInput({ model: '', prompt: 'x', seconds: 4, size: '1280x720' }));
+  assert.throws(() => validateVideoInput({ model: 'm', prompt: 'x', seconds: 0, size: '1280x720' }));
+  assert.throws(() => validateVideoInput({ model: 'm', prompt: 'x', seconds: 4, size: 'wide' }));
+  assert.equal(extensionFor('video/webm'), 'webm');
+  assert.equal(costFrom(new Headers({ 'x-nr-request-cost': '0' })), 0);
+  assert.equal(costFrom(new Headers()), null);
+  console.log('OK: video webpage server');
 }
 
 const server = createServer(async (req, res) => {
@@ -138,7 +203,11 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`nRouter Video Prompt Studio: http://127.0.0.1:${PORT}`);
-  console.log(process.env.NROUTER_API_KEY ? 'API key loaded from the server environment.' : 'No API key found. Prompt building still works; video rendering is disabled.');
-});
+if (process.argv.includes('--self-test')) {
+  selfTest();
+} else {
+  server.listen(PORT, '127.0.0.1', () => {
+    console.log(`nRouter Video Prompt Studio: http://127.0.0.1:${PORT}`);
+    console.log(process.env.NROUTER_API_KEY ? 'API key loaded from the server environment.' : 'No API key found. Prompt building still works; video rendering is disabled.');
+  });
+}
