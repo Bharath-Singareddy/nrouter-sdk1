@@ -1,0 +1,11 @@
+{
+  "name": "nrouter-content-generator-example",
+  "private": true,
+  "type": "module",
+  "description": "A local webpage that generates publish-ready content through nRouter.",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env web-server.mjs",
+    "test": "node web-server.mjs --self-test"
+  }
+}

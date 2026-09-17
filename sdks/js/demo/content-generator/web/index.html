@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>nRouter Content Generator</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">nRouter SDK</p>
+          <h1>Content Generator</h1>
+          <p>Turn one idea into clear, publish-ready content.</p>
+        </div>
+        <div id="keyStatus" class="status">Checking API key…</div>
+      </header>
+
+      <section class="card">
+        <form id="contentForm">
+          <label class="wide">Topic or idea <textarea name="topic" required rows="3" placeholder="Explain how nRouter simplifies multi-model AI applications"></textarea></label>
+          <label>Content type
+            <select name="type">
+              <option>Blog post</option><option>Social media post</option><option>Email</option>
+              <option>Product description</option><option>Video script</option><option>Ad copy</option><option>Documentation</option>
+            </select>
+          </label>
+          <label>Audience <input name="audience" placeholder="AI developers and engineering teams" /></label>
+          <label>Goal <input name="goal" placeholder="Educate and encourage a product trial" /></label>
+          <label>Tone
+            <select name="tone"><option>Professional</option><option>Friendly</option><option>Technical</option><option>Persuasive</option><option>Playful</option><option>Concise</option></select>
+          </label>
+          <label>Length
+            <select name="length"><option value="Short — about 150 words">Short</option><option value="Medium — about 500 words" selected>Medium</option><option value="Long — about 1000 words">Long</option></select>
+          </label>
+          <label>Call to action <input name="callToAction" placeholder="Try nRouter with one API key" /></label>
+          <label class="wide">Key points <textarea name="keyPoints" rows="4" placeholder="One API key&#10;Smart model routing&#10;Fallbacks and monitoring"></textarea></label>
+          <button type="submit">Build content brief</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <div class="row"><h2>Content brief</h2><button id="copyPromptBtn" class="secondary" type="button">Copy</button></div>
+        <textarea id="prompt" rows="9" placeholder="Your editable content brief will appear here."></textarea>
+      </section>
+
+      <section class="card generate">
+        <div class="row"><h2>Generate content</h2><span class="cost">Uses credits</span></div>
+        <div class="settings">
+          <label>Model <input id="model" value="gpt-4.1-mini" /></label>
+          <label>Maximum tokens <input id="maxTokens" type="number" min="100" max="4000" value="1000" /></label>
+        </div>
+        <p class="note">One text-generation request is sent when you confirm. Your API key stays on the local server.</p>
+        <button id="generateBtn" type="button">Generate content</button>
+        <p id="message" class="message"></p>
+      </section>
+
+      <section id="outputCard" class="card output" hidden>
+        <div class="row"><h2>Generated content</h2><div class="actions"><button id="copyBtn" class="secondary" type="button">Copy</button><button id="downloadBtn" class="secondary" type="button">Download .txt</button></div></div>
+        <textarea id="output" rows="18"></textarea>
+        <pre id="meta"></pre>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
