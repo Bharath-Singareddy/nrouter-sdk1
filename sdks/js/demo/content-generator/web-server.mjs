@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict';
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,20 @@ const WEB_DIR = path.join(HERE, 'web');
 const PORT = Number.parseInt(process.env.PORT || '4318', 10);
 const DEFAULT_MODEL = process.env.NROUTER_CONTENT_MODEL || 'gpt-4.1-mini';
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+
+const BLOG_TYPES = {
+  '01-comparison-alternative': { category: 'product', frontmatterCategory: 'Comparison', label: '01 — comparison / alternative' },
+  '02-how-to-guide': { category: 'guides', frontmatterCategory: 'Guides', label: '02 — how-to guide' },
+  '03-engineering-deep-dive': { category: 'engineering', frontmatterCategory: 'Engineering', label: '03 — engineering deep dive' },
+  '04-company-position': { category: 'company', frontmatterCategory: 'Company', label: '04 — company position' },
+  '05-product-capability': { category: 'product', frontmatterCategory: 'Product', label: '05 — product capability' },
+};
+
+const BLOG_PROMPT = await readFile(path.join(HERE, 'prompts', 'final-blog-post.md'), 'utf8');
+const BLOG_MODULES = Object.fromEntries(await Promise.all(Object.keys(BLOG_TYPES).map(async (type) => [
+  type,
+  await readFile(path.join(HERE, 'prompts', `${type}.md`), 'utf8'),
+])));
 
 const TYPES = {
   '.css': 'text/css; charset=utf-8',
@@ -65,6 +79,53 @@ function buildContentPrompt(input) {
   return lines.filter(Boolean).join('\n\n');
 }
 
+function buildBlogPrompt(input) {
+  const workType = value(input.workType);
+  const config = BLOG_TYPES[workType];
+  if (!config) throw new Error('Choose a valid blog work type.');
+
+  const slug = value(input.slug).toLowerCase();
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+    throw new Error('Use a lowercase, hyphen-separated slug, such as smart-model-routing.');
+  }
+
+  const searchIntent = value(input.searchIntent);
+  if (!searchIntent) throw new Error('Enter the exact phrase a reader would search for.');
+
+  const publishedAt = value(input.publishedAt) || new Date().toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(publishedAt)) throw new Error('Choose a valid publication date.');
+
+  const competitor = value(input.competitor);
+  if (workType === '01-comparison-alternative' && !competitor) {
+    throw new Error('Enter the competitor name for a comparison post.');
+  }
+
+  const replacements = new Map([
+    ['{{category}}', config.category],
+    ['{{slug}}', slug],
+    ['{{work-type module appended below}}', config.label],
+    ['{{the exact phrase a reader types}}', searchIntent],
+    ['{{YYYY-MM-DDT00:00:00Z}}', `${publishedAt}T00:00:00Z`],
+    ['{{YYYY-MM-DD}}', publishedAt],
+    ['{{Comparison | Guides | Engineering | Company | Product}}', config.frontmatterCategory],
+  ]);
+
+  let prompt = BLOG_PROMPT;
+  for (const [slot, replacement] of replacements) prompt = prompt.replaceAll(slot, replacement);
+
+  let module = BLOG_MODULES[workType];
+  if (competitor) {
+    module = module
+      .replaceAll('{{Competitor}}', competitor)
+      .replaceAll('{{competitor}}', competitor.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
+  }
+  return `${prompt.trim()}\n\n---\n\n${module.trim()}`;
+}
+
+function buildPrompt(input) {
+  return value(input.mode) === 'blog' ? buildBlogPrompt(input) : buildContentPrompt(input);
+}
+
 function protectEmails(text) {
   const originals = [];
   return {
@@ -111,13 +172,13 @@ async function createContent(body) {
     throw error;
   }
 
-  const prompt = value(body.prompt) || buildContentPrompt(body);
+  const prompt = value(body.prompt) || buildPrompt(body);
   const protectedPrompt = protectEmails(prompt);
   const model = value(body.model) || DEFAULT_MODEL;
   const maxTokens = Number(body.maxTokens || 1000);
   if (!model) throw new Error('A text model is required.');
-  if (!Number.isInteger(maxTokens) || maxTokens < 100 || maxTokens > 4000) {
-    throw new Error('Maximum tokens must be an integer from 100 through 4000.');
+  if (!Number.isInteger(maxTokens) || maxTokens < 100 || maxTokens > 8000) {
+    throw new Error('Maximum tokens must be an integer from 100 through 8000.');
   }
 
   const baseUrl = (process.env.NROUTER_BASE_URL || 'https://api.nrouter.ai/v1').replace(/\/$/, '');
@@ -172,6 +233,17 @@ function selfTest() {
   assert.match(prompt, /AI routing/);
   assert.match(prompt, /developers/);
   assert.throws(() => buildContentPrompt({}));
+  const blogPrompt = buildBlogPrompt({
+    workType: '02-how-to-guide',
+    slug: 'smart-model-routing',
+    searchIntent: 'how to route llm requests',
+    publishedAt: '2026-09-21',
+  });
+  assert.match(blogPrompt, /resources\/web\/content\/blog\/guides\/smart-model-routing\/index\.mdx/);
+  assert.match(blogPrompt, /Primary search intent:\*\* how to route llm requests/);
+  assert.match(blogPrompt, /# Work type 02/);
+  assert.doesNotMatch(blogPrompt, /\{\{category\}\}|\{\{slug\}\}/);
+  assert.throws(() => buildBlogPrompt({ workType: '01-comparison-alternative', slug: 'vendor-alternative', searchIntent: 'vendor alternative' }), /competitor/i);
   assert.equal(extractText({ choices: [{ message: { content: 'Ready' } }] }), 'Ready');
   assert.equal(costFrom(new Headers({ 'x-nr-request-cost': '0.001' })), 0.001);
   assert.equal(costFrom(new Headers()), null);
@@ -190,7 +262,7 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, hasKey: Boolean(process.env.NROUTER_API_KEY), model: DEFAULT_MODEL });
     }
     if (req.method === 'POST' && url.pathname === '/api/prompt') {
-      return sendJson(res, 200, { prompt: buildContentPrompt(await readJson(req)) });
+      return sendJson(res, 200, { prompt: buildPrompt(await readJson(req)) });
     }
     if (req.method === 'POST' && url.pathname === '/api/content') {
       return sendJson(res, 200, await createContent(await readJson(req)));

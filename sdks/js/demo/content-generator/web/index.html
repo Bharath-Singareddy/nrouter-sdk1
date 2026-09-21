@@ -19,23 +19,42 @@
 
       <section class="card">
         <form id="contentForm">
-          <label class="wide">Topic or idea <textarea name="topic" required rows="3" placeholder="Explain how nRouter simplifies multi-model AI applications"></textarea></label>
-          <label>Content type
-            <select name="type">
-              <option>Blog post</option><option>Social media post</option><option>Email</option>
-              <option>Product description</option><option>Video script</option><option>Ad copy</option><option>Documentation</option>
-            </select>
+          <label class="wide">Generator mode
+            <select id="mode" name="mode"><option value="blog">nRouter blog automation</option><option value="general">General content</option></select>
           </label>
-          <label>Audience <input name="audience" placeholder="AI developers and engineering teams" /></label>
-          <label>Goal <input name="goal" placeholder="Educate and encourage a product trial" /></label>
-          <label>Tone
-            <select name="tone"><option>Professional</option><option>Friendly</option><option>Technical</option><option>Persuasive</option><option>Playful</option><option>Concise</option></select>
-          </label>
-          <label>Length
-            <select name="length"><option value="Short — about 150 words">Short</option><option value="Medium — about 500 words" selected>Medium</option><option value="Long — about 1000 words">Long</option></select>
-          </label>
-          <label>Call to action <input name="callToAction" placeholder="Try nRouter with one API key" /></label>
-          <label class="wide">Key points <textarea name="keyPoints" rows="4" placeholder="One API key&#10;Smart model routing&#10;Fallbacks and monitoring"></textarea></label>
+
+          <fieldset id="blogFields">
+            <legend>Final Blog Post Prompt</legend>
+            <label>Work type
+              <select id="workType" name="workType">
+                <option value="01-comparison-alternative">Comparison / alternative</option>
+                <option value="02-how-to-guide" selected>How-to guide</option>
+                <option value="03-engineering-deep-dive">Engineering deep dive</option>
+                <option value="04-company-position">Company position</option>
+                <option value="05-product-capability">Product capability</option>
+              </select>
+            </label>
+            <label>Category <input id="blogCategory" value="guides / Guides" readonly /></label>
+            <label>Post slug <input name="slug" placeholder="smart-model-routing" /></label>
+            <label>Publication date <input id="publishedAt" name="publishedAt" type="date" /></label>
+            <label class="wide">Primary search intent <input name="searchIntent" placeholder="how to route LLM requests across models" /></label>
+            <label id="competitorField" class="wide" hidden>Competitor <input name="competitor" placeholder="Helicone" /></label>
+            <p class="wide note">The category, target path, frontmatter rules, section structure, link rules, and selected work-type module are added automatically.</p>
+          </fieldset>
+
+          <fieldset id="generalFields" hidden>
+            <legend>General content</legend>
+            <label class="wide">Topic or idea <textarea name="topic" rows="3" placeholder="Explain how nRouter simplifies multi-model AI applications"></textarea></label>
+            <label>Content type
+              <select name="type"><option>Blog post</option><option>Social media post</option><option>Email</option><option>Product description</option><option>Video script</option><option>Ad copy</option><option>Documentation</option></select>
+            </label>
+            <label>Audience <input name="audience" placeholder="AI developers and engineering teams" /></label>
+            <label>Goal <input name="goal" placeholder="Educate and encourage a product trial" /></label>
+            <label>Tone <select name="tone"><option>Professional</option><option>Friendly</option><option>Technical</option><option>Persuasive</option><option>Playful</option><option>Concise</option></select></label>
+            <label>Length <select name="length"><option value="Short — about 150 words">Short</option><option value="Medium — about 500 words" selected>Medium</option><option value="Long — about 1000 words">Long</option></select></label>
+            <label>Call to action <input name="callToAction" placeholder="Try nRouter with one API key" /></label>
+            <label class="wide">Key points <textarea name="keyPoints" rows="4" placeholder="One API key&#10;Smart model routing&#10;Fallbacks and monitoring"></textarea></label>
+          </fieldset>
           <button type="submit">Build content brief</button>
         </form>
       </section>
@@ -49,7 +68,7 @@
         <div class="row"><h2>Generate content</h2><span class="cost">Uses credits</span></div>
         <div class="settings">
           <label>Model <input id="model" value="gpt-4.1-mini" /></label>
-          <label>Maximum tokens <input id="maxTokens" type="number" min="100" max="4000" value="1000" /></label>
+          <label>Maximum tokens <input id="maxTokens" type="number" min="100" max="8000" value="6000" /></label>
         </div>
         <p class="note">Email addresses are replaced with private placeholders before the model call and restored in the result. One text-generation request is sent when you confirm. Your API key stays on the local server.</p>
         <button id="generateBtn" type="button">Generate content</button>

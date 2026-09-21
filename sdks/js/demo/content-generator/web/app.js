@@ -1,4 +1,11 @@
 const $ = (selector) => document.querySelector(selector);
+const BLOG_TYPES = {
+  '01-comparison-alternative': 'product / Comparison',
+  '02-how-to-guide': 'guides / Guides',
+  '03-engineering-deep-dive': 'engineering / Engineering',
+  '04-company-position': 'company / Company',
+  '05-product-capability': 'product / Product',
+};
 
 async function request(url, options) {
   const response = await fetch(url, options);
@@ -27,6 +34,25 @@ async function buildBrief() {
   $('#prompt').value = result.prompt;
 }
 
+function updateMode() {
+  const isBlog = $('#mode').value === 'blog';
+  $('#blogFields').hidden = !isBlog;
+  $('#generalFields').hidden = isBlog;
+  $('#maxTokens').value = isBlog ? 6000 : 1000;
+}
+
+function updateWorkType() {
+  const workType = $('#workType').value;
+  $('#blogCategory').value = BLOG_TYPES[workType];
+  $('#competitorField').hidden = workType !== '01-comparison-alternative';
+}
+
+$('#mode').addEventListener('change', updateMode);
+$('#workType').addEventListener('change', updateWorkType);
+$('#publishedAt').value = new Date().toISOString().slice(0, 10);
+updateMode();
+updateWorkType();
+
 $('#contentForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   try {
@@ -53,7 +79,8 @@ $('#downloadBtn').addEventListener('click', () => {
   const blob = new Blob([$('#output').value], { type: 'text/plain;charset=utf-8' });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
-  link.download = 'nrouter-content.txt';
+  const fields = Object.fromEntries(new FormData($('#contentForm')));
+  link.download = fields.mode === 'blog' && fields.slug ? `${fields.slug}.mdx` : 'nrouter-content.txt';
   link.click();
   URL.revokeObjectURL(link.href);
 });

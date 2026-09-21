@@ -3,6 +3,12 @@
 A small local webpage for drafting blog posts, social posts, emails, product
 descriptions, video scripts, ad copy, and documentation with nRouter.
 
+The **nRouter blog automation** mode builds a complete brief from the canonical
+Final Blog Post Prompt. Choose one of the five work types, enter the slug, search
+intent, and publication date, then review the assembled prompt before generation.
+The matching category and work-type module are added automatically, and completed
+blog posts download as `.mdx` files.
+
 ## Run it
 
 ```bash
