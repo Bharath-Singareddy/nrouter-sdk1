@@ -20,10 +20,25 @@
       <section class="card">
         <form id="contentForm">
           <label class="wide">Generator mode
-            <select id="mode" name="mode"><option value="blog">nRouter blog automation</option><option value="general">General content</option></select>
+            <select id="mode" name="mode"><option value="social">Social media automation</option><option value="blog">nRouter blog automation</option><option value="general">General content</option></select>
           </label>
 
-          <fieldset id="blogFields">
+          <fieldset id="socialFields">
+            <legend>Social content for manual posting</legend>
+            <label>Platform
+              <select name="platform"><option>LinkedIn</option><option>X</option><option>Instagram</option><option>All platforms</option></select>
+            </label>
+            <label>Post variations <input name="postCount" type="number" min="1" max="5" value="3" /></label>
+            <label>Audience <input name="audience" placeholder="AI developers and engineering teams" /></label>
+            <label>Tone <select name="tone"><option>Professional</option><option>Friendly</option><option>Technical</option><option>Thought leadership</option><option>Concise</option></select></label>
+            <label>Goal <input name="goal" placeholder="Drive readers to the full article" /></label>
+            <label>Article URL <input name="sourceUrl" type="url" placeholder="https://nrouter.ai/blog/..." /></label>
+            <label class="wide">Call to action <input name="callToAction" placeholder="Read the full article and try nRouter" /></label>
+            <label class="wide">Finished blog post or source content <textarea name="sourceContent" rows="12" placeholder="Paste the final blog post, article, release notes, or source material here."></textarea></label>
+            <p class="wide note">This generates copy only. Review the result, then copy or download it and publish manually.</p>
+          </fieldset>
+
+          <fieldset id="blogFields" hidden>
             <legend>Final Blog Post Prompt</legend>
             <label>Work type
               <select id="workType" name="workType">

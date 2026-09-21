@@ -9,6 +9,10 @@ intent, and publication date, then review the assembled prompt before generation
 The matching category and work-type module are added automatically, and completed
 blog posts download as `.mdx` files.
 
+The **Social media automation** mode turns a finished blog post or other source
+material into reviewable LinkedIn, X, or Instagram variations. It generates copy
+only: publishing remains a manual step, so no social account connection is needed.
+
 ## Run it
 
 ```bash

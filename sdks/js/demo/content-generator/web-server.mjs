@@ -122,8 +122,49 @@ function buildBlogPrompt(input) {
   return `${prompt.trim()}\n\n---\n\n${module.trim()}`;
 }
 
+function buildSocialPrompt(input) {
+  const source = value(input.sourceContent);
+  if (!source) throw new Error('Paste the finished blog post or source content first.');
+
+  const platform = value(input.platform) || 'LinkedIn';
+  const allowedPlatforms = new Set(['LinkedIn', 'X', 'Instagram', 'All platforms']);
+  if (!allowedPlatforms.has(platform)) throw new Error('Choose a supported social platform.');
+
+  const postCount = Number(input.postCount || 3);
+  if (!Number.isInteger(postCount) || postCount < 1 || postCount > 5) {
+    throw new Error('Choose between 1 and 5 post variations.');
+  }
+
+  const lines = [
+    'Turn the source content below into social media content for nRouter.',
+    `Platform: ${platform}`,
+    `Create ${postCount} distinct post variation${postCount === 1 ? '' : 's'}.`,
+    input.audience && `Audience: ${value(input.audience)}`,
+    input.tone && `Tone: ${value(input.tone)}`,
+    input.goal && `Goal: ${value(input.goal)}`,
+    input.sourceUrl && `Article URL: ${value(input.sourceUrl)}`,
+    input.callToAction && `Call to action: ${value(input.callToAction)}`,
+    '',
+    'Rules:',
+    '- Use only facts supported by the source. Do not invent prices, metrics, features, or customer claims.',
+    '- Write complete copy that can be reviewed and posted manually.',
+    '- Give each variation a clear label and keep hashtags relevant and limited.',
+    '- For LinkedIn, use a strong opening, short paragraphs, and 3–5 hashtags.',
+    '- For X, keep a single post within 280 characters; if more context is necessary, format a numbered thread.',
+    '- For Instagram, write a concise caption with a clear call to action and 5–8 relevant hashtags.',
+    '- When All platforms is selected, create a separate section for LinkedIn, X, and Instagram.',
+    '',
+    'Source content:',
+    source,
+  ];
+  return lines.filter((line) => line !== false && line !== undefined).join('\n');
+}
+
 function buildPrompt(input) {
-  return value(input.mode) === 'blog' ? buildBlogPrompt(input) : buildContentPrompt(input);
+  const mode = value(input.mode);
+  if (mode === 'blog') return buildBlogPrompt(input);
+  if (mode === 'social') return buildSocialPrompt(input);
+  return buildContentPrompt(input);
 }
 
 function protectEmails(text) {
@@ -244,6 +285,11 @@ function selfTest() {
   assert.match(blogPrompt, /# Work type 02/);
   assert.doesNotMatch(blogPrompt, /\{\{category\}\}|\{\{slug\}\}/);
   assert.throws(() => buildBlogPrompt({ workType: '01-comparison-alternative', slug: 'vendor-alternative', searchIntent: 'vendor alternative' }), /competitor/i);
+  const socialPrompt = buildSocialPrompt({ sourceContent: 'nRouter connects applications to multiple models.', platform: 'LinkedIn', postCount: 3 });
+  assert.match(socialPrompt, /Platform: LinkedIn/);
+  assert.match(socialPrompt, /Create 3 distinct post variations/);
+  assert.match(socialPrompt, /nRouter connects applications/);
+  assert.throws(() => buildSocialPrompt({}), /source content/i);
   assert.equal(extractText({ choices: [{ message: { content: 'Ready' } }] }), 'Ready');
   assert.equal(costFrom(new Headers({ 'x-nr-request-cost': '0.001' })), 0.001);
   assert.equal(costFrom(new Headers()), null);

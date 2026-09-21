@@ -35,10 +35,13 @@ async function buildBrief() {
 }
 
 function updateMode() {
-  const isBlog = $('#mode').value === 'blog';
+  const mode = $('#mode').value;
+  const isBlog = mode === 'blog';
+  const isSocial = mode === 'social';
   $('#blogFields').hidden = !isBlog;
-  $('#generalFields').hidden = isBlog;
-  $('#maxTokens').value = isBlog ? 6000 : 1000;
+  $('#socialFields').hidden = !isSocial;
+  $('#generalFields').hidden = mode !== 'general';
+  $('#maxTokens').value = isBlog ? 6000 : isSocial ? 1800 : 1000;
 }
 
 function updateWorkType() {
@@ -80,7 +83,7 @@ $('#downloadBtn').addEventListener('click', () => {
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
   const fields = Object.fromEntries(new FormData($('#contentForm')));
-  link.download = fields.mode === 'blog' && fields.slug ? `${fields.slug}.mdx` : 'nrouter-content.txt';
+  link.download = fields.mode === 'blog' && fields.slug ? `${fields.slug}.mdx` : fields.mode === 'social' ? 'nrouter-social-posts.txt' : 'nrouter-content.txt';
   link.click();
   URL.revokeObjectURL(link.href);
 });
