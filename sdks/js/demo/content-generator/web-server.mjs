@@ -11,6 +11,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.join(HERE, 'web');
 const PORT = Number.parseInt(process.env.PORT || '4318', 10);
 const DEFAULT_MODEL = process.env.NROUTER_CONTENT_MODEL || 'gpt-4.1-mini';
+const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 
 const TYPES = {
   '.css': 'text/css; charset=utf-8',
@@ -64,6 +65,24 @@ function buildContentPrompt(input) {
   return lines.filter(Boolean).join('\n\n');
 }
 
+function protectEmails(text) {
+  const originals = [];
+  return {
+    text: text.replace(EMAIL_PATTERN, (email) => {
+      originals.push(email);
+      return `[[CONTACT_ADDRESS_${originals.length}]]`;
+    }),
+    originals,
+  };
+}
+
+function restoreEmails(text, originals) {
+  return originals.reduce(
+    (restored, email, index) => restored.replaceAll(`[[CONTACT_ADDRESS_${index + 1}]]`, email),
+    text,
+  );
+}
+
 function costFrom(headers) {
   const raw = headers.get('x-nr-request-cost');
   if (raw === null || !/^(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(raw.trim())) return null;
@@ -93,6 +112,7 @@ async function createContent(body) {
   }
 
   const prompt = value(body.prompt) || buildContentPrompt(body);
+  const protectedPrompt = protectEmails(prompt);
   const model = value(body.model) || DEFAULT_MODEL;
   const maxTokens = Number(body.maxTokens || 1000);
   if (!model) throw new Error('A text model is required.');
@@ -112,8 +132,8 @@ async function createContent(body) {
       body: JSON.stringify({
         model,
         messages: [
-          { role: 'system', content: 'You are an expert content writer. Follow the requested format, audience, tone, and length.' },
-          { role: 'user', content: prompt },
+          { role: 'system', content: 'You are an expert content writer. Follow the requested format, audience, tone, and length. Preserve tokens like [[CONTACT_ADDRESS_1]] exactly.' },
+          { role: 'user', content: protectedPrompt.text },
         ],
         max_tokens: maxTokens,
         temperature: 0.7,
@@ -125,8 +145,10 @@ async function createContent(body) {
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(gatewayError(payload, response.status));
+  const generatedContent = extractText(payload);
   return {
-    content: extractText(payload),
+    content: restoreEmails(generatedContent, protectedPrompt.originals),
+    protectedEmailCount: protectedPrompt.originals.length,
     model: payload.model || model,
     usage: payload.usage || null,
     cost: costFrom(response.headers),
@@ -153,6 +175,11 @@ function selfTest() {
   assert.equal(extractText({ choices: [{ message: { content: 'Ready' } }] }), 'Ready');
   assert.equal(costFrom(new Headers({ 'x-nr-request-cost': '0.001' })), 0.001);
   assert.equal(costFrom(new Headers()), null);
+  const protectedEmails = protectEmails('Contact hello@nrouter.ai or jane@example.com.');
+  assert.equal(protectedEmails.text, 'Contact [[CONTACT_ADDRESS_1]] or [[CONTACT_ADDRESS_2]].');
+  assert.deepEqual(protectedEmails.originals, ['hello@nrouter.ai', 'jane@example.com']);
+  assert.equal(restoreEmails(protectedEmails.text, protectedEmails.originals), 'Contact hello@nrouter.ai or jane@example.com.');
+  assert.deepEqual(protectEmails('No contact details here.'), { text: 'No contact details here.', originals: [] });
   console.log('OK: content generator server');
 }
 

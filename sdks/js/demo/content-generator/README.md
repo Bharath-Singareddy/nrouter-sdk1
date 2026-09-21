@@ -15,6 +15,9 @@ npm start
 Open `http://127.0.0.1:4318`.
 
 The API key stays in the local server process and is never sent to the browser.
+Email addresses in a content brief are replaced with private placeholders before
+the model request and restored in the generated result. This prevents nRouter's
+PreCall PII guardrail from receiving the address while keeping the guardrail on.
 Building and editing the content brief is free. Clicking **Generate content**
 sends one billed `POST /v1/chat/completions` request after confirmation. The
 result includes the nRouter request ID, exact cost when priced, and token usage.
@@ -25,5 +28,5 @@ result includes the nRouter request ID, exact cost when priced, and token usage.
 npm test
 ```
 
-The self-test validates the prompt builder, response parser, and cost parsing
-without using an API key or contacting nRouter.
+The self-test validates the prompt builder, email protection, response parser,
+and cost parsing without using an API key or contacting nRouter.

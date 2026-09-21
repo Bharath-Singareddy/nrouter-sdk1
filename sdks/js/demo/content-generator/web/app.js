@@ -76,7 +76,7 @@ $('#generateBtn').addEventListener('click', async () => {
       body: JSON.stringify({ prompt, model: $('#model').value, maxTokens: Number($('#maxTokens').value) }),
     });
     $('#output').value = result.content;
-    $('#meta').textContent = JSON.stringify({ model: result.model, usage: result.usage, cost: result.cost, costStatus: result.costStatus, requestId: result.requestId }, null, 2);
+    $('#meta').textContent = JSON.stringify({ model: result.model, usage: result.usage, cost: result.cost, costStatus: result.costStatus, requestId: result.requestId, protectedEmailCount: result.protectedEmailCount }, null, 2);
     $('#outputCard').hidden = false;
     $('#message').textContent = 'Content generated successfully.';
     $('#outputCard').scrollIntoView({ behavior: 'smooth' });
