@@ -7,6 +7,7 @@ export interface SocialMediaOptions {
   apiKey?: string;
   topic: string;
   history: string[];
+  maxTokens?: number;
 }
 
 export async function generateSocialMediaContent(options: SocialMediaOptions): Promise<string> {
@@ -16,11 +17,13 @@ export async function generateSocialMediaContent(options: SocialMediaOptions): P
   const instructions = fs.readFileSync(path.join(_dirname, '../skills/instructions.md'), 'utf-8');
   const brand = fs.readFileSync(path.join(_dirname, '../skills/brand.md'), 'utf-8');
 
+  const maxTokens = Math.min(8000, Math.max(512, options.maxTokens || 2500));
+
   const response = await client.nr.messages({
     model: process.env.NROUTER_MODEL || 'claude-haiku-4-5-20251001',
     system: instructions + '\n\n' + brand + '\n\nHistory context: ' + options.history.join(', '),
     messages: [{ role: 'user', content: options.topic }],
-    max_tokens: 1024,
+    max_tokens: maxTokens,
   });
 
   const body = response.body as any;

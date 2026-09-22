@@ -1,0 +1,4 @@
+campaign_id,topic,user_prompt
+efficient-guardrails,Efficient Guardrails,Create a campaign explaining how centralized AI guardrails help engineering teams apply consistent request policies without duplicating checks across every application. Use only verified customer-visible nRouter capabilities and avoid unsupported performance claims.
+smart-routing,Smart Routing,Create a campaign explaining how an AI gateway can route requests across appropriate models while giving application teams one consistent API surface. Focus on the customer workflow and do not invent routing benchmarks or provider guarantees.
+budget-controls,Budget Controls,Create a campaign explaining how team and project budget controls help engineering organizations manage AI spend before it becomes an end-of-month surprise. Use only verified nRouter pricing and product facts and avoid invented savings figures.

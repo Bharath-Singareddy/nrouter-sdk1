@@ -9,3 +9,4 @@ coverage/
 e2e/.kb.json
 test-results/
 playwright-report/
+e2e/data/

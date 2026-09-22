@@ -27,7 +27,8 @@
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "e2e": "npm run build && playwright test"
+    "e2e": "npm run build && playwright test",
+    "demo": "node e2e/demo-server.mjs"
   },
   "dependencies": {
     "@nrouter_ai/sdk": "3.1.2"

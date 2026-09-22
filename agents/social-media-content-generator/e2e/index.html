@@ -1,21 +1,137 @@
-<!DOCTYPE html>
-<html>
-<body>
-  <h1>Social Media Generator</h1>
-  <input type="text" id="queryInput" placeholder="Enter query..." />
-  <button id="genBtn">Generate</button>
-  <pre id="output"></pre>
-  <script>
-    document.getElementById('genBtn').onclick = async () => {
-      const val = document.getElementById('queryInput').value;
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic: val })
-      });
-      const data = await res.json();
-      document.getElementById('output').textContent = data.result || data.error;
-    };
-  </script>
-</body>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>nRouter Social Studio</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="nRouter Social Studio home">
+          <img class="brand-logo" src="/assets/nrouter-logo.png" alt="nRouter.ai" />
+          <span class="brand-product">Social Studio</span>
+        </a>
+        <div class="top-actions">
+          <span id="health" class="status"><i></i>Checking local agent</span>
+          <button id="resetBtn" class="button ghost" type="button">New campaign</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div>
+            <span class="kicker">AI content workspace</span>
+            <h1>One idea. A complete content package.</h1>
+            <p>Create the campaign angle, headline, hooks, platform-ready social copy, and an optional complete article. Review the final copy once, then schedule the approved package.</p>
+          </div>
+          <div class="workflow" aria-label="Workflow"><span class="active">1&nbsp; Create</span><b></b><span>2&nbsp; Review</span><b></b><span>3&nbsp; Schedule</span></div>
+        </section>
+
+        <div class="workspace">
+          <form id="campaignForm" class="panel composer">
+            <div class="panel-heading">
+              <div><span class="step">01</span><h2>Campaign brief</h2></div>
+              <span class="required">Required fields marked *</span>
+            </div>
+
+            <div class="field">
+              <label for="campaignTemplate">Campaign catalogue</label>
+              <select id="campaignTemplate"><option value="">Custom campaign idea</option></select>
+              <small>Selecting a campaign fills the approved user prompt from campaign-ideas.csv.</small>
+            </div>
+
+            <div class="field api-field">
+              <label for="apiKey">nRouter API key</label>
+              <div class="input-action">
+                <input id="apiKey" name="apiKey" type="password" autocomplete="off" placeholder="Leave blank to use the local server key" />
+                <button id="toggleKey" type="button" class="icon-button" aria-label="Show API key">Show</button>
+              </div>
+              <small>The key is sent only to this local server for the request and is not saved.</small>
+            </div>
+
+            <div class="field">
+              <div class="label-row"><label for="idea">Content idea *</label><span id="ideaCount">0 / 600</span></div>
+              <textarea id="idea" name="idea" maxlength="600" rows="5" required placeholder="Example: Explain why fallback routing reduces failed AI requests without forcing teams to maintain provider-specific clients."></textarea>
+            </div>
+
+            <div class="grid two">
+              <div class="field"><label for="contentType">Content type</label><select id="contentType" name="contentType"><option>Technical insight</option><option>Blog promotion</option><option>Product announcement</option><option>Feature education</option><option>Thought leadership</option><option>Community update</option></select></div>
+              <div class="field"><label for="goal">Campaign goal</label><select id="goal" name="goal"><option>Awareness and engagement</option><option>Website visits</option><option>Product signups</option><option>Community discussion</option><option>Feature adoption</option></select></div>
+              <div class="field"><label for="audience">Audience</label><input id="audience" name="audience" value="AI developers and engineering teams" /></div>
+              <div class="field"><label for="tone">Tone</label><select id="tone" name="tone"><option>Professional and developer-friendly</option><option>Technical and authoritative</option><option>Bold and concise</option><option>Friendly and educational</option><option>Thought leadership</option></select></div>
+            </div>
+
+            <fieldset class="field">
+              <legend>Destinations *</legend>
+              <div class="platform-grid">
+                <label class="platform selected"><input type="checkbox" name="platforms" value="LinkedIn" checked /><span class="platform-icon linkedin">in</span><span><strong>LinkedIn</strong><small>Professional post</small></span></label>
+                <label class="platform"><input type="checkbox" name="platforms" value="Instagram" /><span class="platform-icon instagram">◎</span><span><strong>Instagram</strong><small>Caption + hashtags</small></span></label>
+                <label class="platform"><input type="checkbox" name="platforms" value="X" /><span class="platform-icon x">X</span><span><strong>X</strong><small>Post or thread</small></span></label>
+                <label class="platform"><input type="checkbox" name="platforms" value="YouTube" /><span class="platform-icon youtube">▶</span><span><strong>YouTube</strong><small>Community + description</small></span></label>
+              </div>
+            </fieldset>
+
+            <fieldset class="field package-options">
+              <legend>Content package</legend>
+              <label class="package-choice"><input id="includeBlog" type="checkbox" /><span><strong>Include complete blog article</strong><small>Add title, hook, structure, final article, and CTA.</small></span></label>
+              <label id="articleLengthField" hidden>Article length<select id="articleLength"><option>Short — about 800 words</option><option selected>Standard — about 1,500 words</option><option>Deep dive — about 2,500 words</option></select></label>
+              <p class="note">Image and video concepts, prompts, scenes, and scripts are excluded from this content-only workflow.</p>
+            </fieldset>
+
+            <div class="grid two">
+              <div class="field"><label for="variations">Variations per destination</label><select id="variations" name="variations"><option value="1">1 variation</option><option value="2">2 variations</option><option value="3" selected>3 variations</option><option value="4">4 variations</option><option value="5">5 variations</option></select></div>
+              <div class="field"><label for="sourceUrl">Source or article URL</label><input id="sourceUrl" name="sourceUrl" type="url" placeholder="https://nrouter.ai/blog/..." /></div>
+            </div>
+
+            <details>
+              <summary>Advanced guidance <span>Optional</span></summary>
+              <div class="details-body">
+                <div class="field"><label for="callToAction">Call to action</label><input id="callToAction" name="callToAction" placeholder="Read the article and try nRouter" /></div>
+                <div class="field"><label for="keyPoints">Required points</label><textarea id="keyPoints" name="keyPoints" rows="4" placeholder="One fact or message per line"></textarea></div>
+                <div class="switches">
+                  <label><input id="includeHashtags" type="checkbox" checked /><span></span>Include hashtags</label>
+                  <label><input id="includeEmojis" type="checkbox" checked /><span></span>Allow limited emojis</label>
+                </div>
+              </div>
+            </details>
+
+            <div class="billing-note"><span>◆</span><p><strong>One generation request uses credits.</strong> You will confirm before the request is sent.</p></div>
+            <button id="generateBtn" class="button primary" type="submit"><span>Generate campaign</span><kbd>Ctrl ↵</kbd></button>
+            <p id="formMessage" class="form-message" role="status"></p>
+          </form>
+
+          <aside class="right-column">
+            <section class="panel output-panel">
+              <div class="panel-heading">
+                <div><span class="step">02</span><h2>Campaign drafts</h2></div>
+                <div class="output-actions"><button id="copyBtn" class="button ghost small" type="button" disabled>Copy</button><button id="downloadBtn" class="button ghost small" type="button" disabled>Download</button></div>
+              </div>
+              <div id="emptyState" class="empty-state"><div class="spark">✦</div><h3>Your content package will appear here</h3><p>Generate the campaign, review the angle and copy, then approve it for download or scheduling.</p></div>
+              <div id="loadingState" class="loading-state" hidden><div class="loader"></div><h3>Building your content package</h3><p>The agent is creating the angle, hooks, platform drafts, and requested article.</p></div>
+              <div id="resultState" hidden><div id="resultMeta" class="result-meta"></div><textarea id="output" aria-label="Generated social media drafts"></textarea></div>
+            </section>
+
+            <section class="panel review-panel">
+              <div class="panel-heading"><div><span class="step">03</span><h2>Approve and schedule</h2></div><span class="review-badge">Approval required</span></div>
+              <p class="section-copy">Confirm product accuracy, message clarity, brand terminology, platform fit, verified links, and the absence of unsupported claims or invented statistics.</p>
+              <label class="approval"><input id="approvalCheck" type="checkbox" disabled /><span><strong>I reviewed and approve the exact content above</strong><small>Editing the generated content requires approval again.</small></span></label>
+              <div class="schedule-grid">
+                <label>Publish date and time<input id="scheduleAt" type="datetime-local" disabled /></label>
+                <label>Time zone<input id="timezone" readonly /></label>
+              </div>
+              <button id="scheduleBtn" class="button primary schedule-button" type="button" disabled>Schedule approved content</button>
+              <p class="section-copy scheduler-note">The local queue is automatic. At the due time, a campaign without an authorized platform connector remains marked <strong>Awaiting connector</strong>.</p>
+              <p id="scheduleMessage" class="form-message" role="status"></p>
+              <div class="queue-heading"><h3>Local schedule queue</h3><button id="refreshQueueBtn" class="button ghost small" type="button">Refresh</button></div>
+              <div id="scheduleList" class="schedule-list"><p class="queue-empty">No campaigns scheduled.</p></div>
+            </section>
+          </aside>
+        </div>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
 </html>

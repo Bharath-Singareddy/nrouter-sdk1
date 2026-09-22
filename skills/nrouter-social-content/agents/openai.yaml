@@ -1,0 +1,4 @@
+interface:
+  display_name: "nRouter Social Content"
+  short_description: "Create, review, and schedule written campaign packages"
+  default_prompt: "Create a complete nRouter written content package from my campaign idea, including the campaign angle, hooks, social posts, and an optional article. Let me review the exact copy before scheduling it."
